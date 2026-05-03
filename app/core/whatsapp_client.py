@@ -67,7 +67,6 @@ class WhatsAppClientManager:
         self._event_handlers: Dict[str, List[Callable]] = {}
         self._message_store: List[Dict] = []
         self._contacts_cache: Dict[str, Dict] = {}
-        self._auto_reply_rules: List[Dict] = []
         self._is_running: bool = False
         self._connection_task: Optional[asyncio.Task] = None
         # Periodic watcher that detects silent session expiry (whatsmeow keeps
@@ -152,9 +151,25 @@ class WhatsAppClientManager:
         buffer.seek(0)
         return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
+    async def _sync_settings_from_db(self) -> None:
+        """Mirror DB-stored config into in-process settings on startup."""
+        try:
+            from app.core.database import db
+
+            cfg = await db.get_config()
+            if cfg:
+                settings.AUTO_REPLY_ENABLED = bool(cfg.get("enabled"))
+                if cfg.get("default_message"):
+                    settings.AUTO_REPLY_MESSAGE = cfg["default_message"]
+                if cfg.get("assistant_name"):
+                    settings.ASSISTANT_NAME = cfg["assistant_name"]
+        except Exception as e:
+            logger.warning(f"Could not sync assistant config from DB: {e}")
+
     async def initialize(self):
         """Initialize the WhatsApp client with event handlers."""
         logger.info("Initializing WhatsApp client...")
+        await self._sync_settings_from_db()
 
         self._client = NewAClient(
             settings.WA_DATABASE_PATH,
@@ -712,40 +727,240 @@ class WhatsAppClientManager:
             logger.error(f"Failed to get groups: {e}")
             return []
 
-    # ─── Auto-Reply System ───────────────────────────────────────────────
+    # ─── Auto-Reply System (DB-backed) ───────────────────────────────────
 
-    def set_auto_reply(self, enabled: bool, message: Optional[str] = None, rules: Optional[List[Dict]] = None):
-        """Configure auto-reply settings."""
-        settings.AUTO_REPLY_ENABLED = enabled
-        if message:
-            settings.AUTO_REPLY_MESSAGE = message
-        if rules:
-            self._auto_reply_rules = rules
-        logger.info(f"Auto-reply {'enabled' if enabled else 'disabled'}")
+    async def get_auto_reply_config(self) -> Dict[str, Any]:
+        """Read live auto-reply config (singleton row + rules) from the DB."""
+        from app.core.database import db
 
-    def get_auto_reply_config(self) -> Dict[str, Any]:
-        """Get current auto-reply configuration."""
+        cfg = await db.get_config()
+        rules = await db.list_rules()
         return {
-            "enabled": settings.AUTO_REPLY_ENABLED,
-            "message": settings.AUTO_REPLY_MESSAGE,
-            "assistant_name": settings.ASSISTANT_NAME,
-            "rules": self._auto_reply_rules,
+            "enabled": bool(cfg.get("enabled")),
+            "message": cfg.get("default_message", ""),
+            "assistant_name": cfg.get("assistant_name", settings.ASSISTANT_NAME),
+            "llm_enabled": bool(cfg.get("llm_enabled")),
+            "llm_system_prompt": cfg.get("llm_system_prompt", ""),
+            "quiet_hours": {
+                "enabled": bool(cfg.get("quiet_hours_enabled")),
+                "start": cfg.get("quiet_hours_start", "22:00"),
+                "end": cfg.get("quiet_hours_end", "08:00"),
+                "timezone": cfg.get("quiet_hours_timezone", "UTC"),
+                "message": cfg.get("quiet_hours_message", ""),
+                "defer_scheduled": bool(cfg.get("quiet_hours_defer_scheduled")),
+            },
+            "rules": rules,
         }
 
-    async def _should_auto_reply(self, sender_jid: str, message_text: str) -> Tuple[bool, str]:
-        """Determine if auto-reply should be sent based on rules."""
-        if not settings.AUTO_REPLY_ENABLED:
-            return False, ""
+    async def set_auto_reply_config(self, **fields: Any) -> Dict[str, Any]:
+        """Persist core auto-reply config fields to the DB."""
+        from app.core.database import db
 
-        # Check custom rules first
-        for rule in self._auto_reply_rules:
-            if rule.get("contact") and rule["contact"] in sender_jid:
-                return True, rule.get("message", settings.AUTO_REPLY_MESSAGE)
-            if rule.get("keyword") and rule["keyword"].lower() in message_text.lower():
-                return True, rule.get("message", settings.AUTO_REPLY_MESSAGE)
+        await db.update_config(**fields)
+        # Mirror to in-process settings so log lines / status reflect reality.
+        if "enabled" in fields and fields["enabled"] is not None:
+            settings.AUTO_REPLY_ENABLED = bool(fields["enabled"])
+        if "default_message" in fields and fields["default_message"]:
+            settings.AUTO_REPLY_MESSAGE = fields["default_message"]
+        if "assistant_name" in fields and fields["assistant_name"]:
+            settings.ASSISTANT_NAME = fields["assistant_name"]
+        return await self.get_auto_reply_config()
 
-        # Default auto-reply
-        return True, settings.AUTO_REPLY_MESSAGE
+    @staticmethod
+    def _rule_matches(rule: Dict, sender_jid: str, sender_phone: str, text: str) -> bool:
+        """Apply contact + keyword filters with the configured match mode."""
+        contact = (rule.get("contact") or "").strip()
+        if contact:
+            target = contact.lower()
+            if target not in sender_jid.lower() and target not in sender_phone.lower():
+                return False
+
+        keyword = (rule.get("keyword") or "").strip()
+        if not keyword:
+            # Contact-only rule (or universal if both empty) is fine.
+            return True
+
+        mode = (rule.get("match_mode") or "contains").lower()
+        haystack = text or ""
+        needle = keyword
+        if mode == "regex":
+            try:
+                return re.search(needle, haystack, re.IGNORECASE) is not None
+            except re.error:
+                return False
+        h_low = haystack.lower()
+        n_low = needle.lower()
+        if mode == "exact":
+            return h_low.strip() == n_low.strip()
+        if mode == "starts_with":
+            return h_low.lstrip().startswith(n_low)
+        return n_low in h_low  # contains (default)
+
+    async def _evaluate_auto_reply(
+        self,
+        sender_jid: str,
+        message_text: str,
+        sender_pushname: Optional[str] = None,
+    ) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+        """
+        Decide whether to auto-reply. Returns (should_reply, reply_text, matched_rule).
+
+        Resolution order:
+            1. Global enabled? — no → silent.
+            2. Quiet hours? — yes → away message or silent.
+            3. First matching enabled rule (in priority order) → its reply.
+            4. No rule matched + global llm_enabled → LLM catch-all.
+            5. No rule matched + no rules at all → default static message.
+            6. Otherwise (rules exist but none matched, no LLM) → silent.
+        """
+        from app.core.database import db
+        from app.core.llm import LLMError, llm_client
+        from app.core.quiet_hours import is_quiet_now
+
+        cfg = await db.get_config()
+        if not cfg.get("enabled"):
+            logger.debug("Auto-reply skipped: globally disabled")
+            return False, "", None
+
+        if is_quiet_now(cfg):
+            quiet_msg = (cfg.get("quiet_hours_message") or "").strip()
+            if not quiet_msg:
+                logger.info("Auto-reply skipped: in quiet hours, no away message set")
+                return False, "", None
+            logger.info("Auto-reply: sending quiet-hours away message")
+            return True, quiet_msg, None
+
+        rules = await db.list_rules()
+        sender_phone = self.normalize_phone(sender_jid)
+        now_ts = time.time()
+
+        matched_rule: Optional[Dict[str, Any]] = None
+        for rule in rules:
+            if not rule.get("enabled"):
+                continue
+            if not self._rule_matches(rule, sender_jid, sender_phone, message_text):
+                continue
+            cooldown = int(rule.get("cooldown_seconds") or 0)
+            if cooldown > 0:
+                last = await db.get_cooldown(int(rule["id"]), sender_jid)
+                if last is not None and (now_ts - last) < cooldown:
+                    logger.info("Auto-reply skipped: rule %s on cooldown for %s", rule["id"], sender_jid)
+                    return False, "", rule
+            matched_rule = rule
+            break
+
+        # Resolve persona — used by the LLM path whether or not a rule matched.
+        persona = await db.find_persona_for_jid(sender_jid, pushname=sender_pushname)
+        if persona:
+            logger.debug("Persona matched for %s: %s", sender_jid, persona.get("display_name") or persona.get("contact"))
+
+        # ─── Path A: a rule matched ───────────────────────────────────────
+        if matched_rule is not None:
+            cooldown = int(matched_rule.get("cooldown_seconds") or 0)
+            persona_wants_llm = persona is not None and bool(persona.get("use_llm"))
+            persona_blocks_llm = persona is not None and not bool(persona.get("use_llm"))
+            wants_llm = (
+                bool(matched_rule.get("use_llm"))
+                or persona_wants_llm
+                or (bool(cfg.get("llm_enabled")) and not (matched_rule.get("message") or "").strip())
+            )
+            if persona_blocks_llm:
+                wants_llm = False
+
+            if wants_llm:
+                reply = await self._llm_reply(cfg, persona, sender_jid, message_text)
+                if reply is not None:
+                    if cooldown > 0:
+                        await db.touch_cooldown(int(matched_rule["id"]), sender_jid, now_ts)
+                    return True, reply, matched_rule
+                # else fall through to static text
+
+            reply_text = (matched_rule.get("message") or cfg.get("default_message") or "").strip()
+            if not reply_text:
+                return False, "", matched_rule
+            if cooldown > 0:
+                await db.touch_cooldown(int(matched_rule["id"]), sender_jid, now_ts)
+            return True, reply_text, matched_rule
+
+        # ─── Path B: no rule matched ──────────────────────────────────────
+        llm_globally_on = bool(cfg.get("llm_enabled"))
+        persona_wants_llm = persona is not None and bool(persona.get("use_llm"))
+        persona_blocks_llm = persona is not None and not bool(persona.get("use_llm"))
+
+        # A persona with use_llm=True opts this contact into LLM replies, even
+        # if the global llm_enabled toggle is off.
+        should_use_llm = (llm_globally_on or persona_wants_llm) and not persona_blocks_llm
+
+        if should_use_llm:
+            reply = await self._llm_reply(cfg, persona, sender_jid, message_text)
+            if reply is not None:
+                source = "persona-driven" if persona_wants_llm and not llm_globally_on else "catch-all"
+                logger.info("Auto-reply: LLM (%s) replied to %s", source, sender_jid)
+                return True, reply, None
+            # LLM failed/unavailable — fall through
+
+        if not rules:
+            # No rules configured — use the default message.
+            default_msg = (cfg.get("default_message") or settings.AUTO_REPLY_MESSAGE or "").strip()
+            if default_msg:
+                return True, default_msg, None
+
+        logger.info(
+            "Auto-reply skipped: no rule matched and "
+            "%s",
+            "LLM not configured/enabled" if not llm_globally_on or not llm_client.is_configured
+            else "LLM call failed",
+        )
+        return False, "", None
+
+    async def _llm_reply(
+        self,
+        cfg: Dict[str, Any],
+        persona: Optional[Dict[str, Any]],
+        sender_jid: str,
+        message_text: str,
+    ) -> Optional[str]:
+        """Build prompt, call LLM. Returns None on failure or when not configured."""
+        from app.core.llm import LLMError, llm_client
+
+        if not llm_client.is_configured:
+            logger.info("LLM reply requested but provider is not configured (%s)", llm_client.provider)
+            return None
+
+        system_prompt = (
+            (persona or {}).get("system_prompt_override")
+            or cfg.get("llm_system_prompt")
+            or settings.LLM_SYSTEM_PROMPT
+        )
+        notes = (persona or {}).get("notes") or ""
+        if notes:
+            system_prompt = f"{system_prompt}\n\nContact context:\n{notes}"
+
+        history = self._recent_history_for_chat(sender_jid, settings.LLM_HISTORY_SIZE)
+        try:
+            return await llm_client.generate_reply(
+                system_prompt=system_prompt,
+                history=history,
+                user_message=message_text,
+            )
+        except LLMError as e:
+            logger.warning("LLM reply failed: %s", e)
+            return None
+
+    def _recent_history_for_chat(self, sender_jid: str, limit: int) -> List[Dict[str, str]]:
+        """Build {role, content} history for the LLM from the in-memory store."""
+        if limit <= 0:
+            return []
+        history: List[Dict[str, str]] = []
+        for msg in self._message_store[-500:]:
+            if msg.get("chat_jid") != sender_jid and msg.get("from") != sender_jid:
+                continue
+            text = (msg.get("text") or "").strip()
+            if not text or text.startswith("["):
+                continue
+            role = "assistant" if msg.get("is_from_me") else "user"
+            history.append({"role": role, "content": text})
+        return history[-limit:]
 
     # ─── Event System ────────────────────────────────────────────────────
 
@@ -823,17 +1038,21 @@ class WhatsAppClientManager:
 
             # Auto-reply logic (don't reply to own messages or group messages)
             if not is_from_me and not is_group and text:
-                should_reply, reply_text = await self._should_auto_reply(sender_jid, text)
-                if should_reply:
+                should_reply, reply_text, matched_rule = await self._evaluate_auto_reply(
+                    sender_jid, text, sender_pushname=sender_name,
+                )
+                if should_reply and reply_text:
                     await asyncio.sleep(2)  # Natural delay
                     try:
                         jid = info.MessageSource.Chat
                         await client.send_message(jid, reply_text)
-                        logger.info(f"Auto-replied to {sender_name}: {reply_text[:50]}")
+                        logger.info(f"Auto-replied to {sender_name}: {reply_text[:80]}")
                         await self._emit_event("auto_reply_sent", {
                             "to": sender_jid,
                             "message": reply_text,
                             "original_message": text,
+                            "rule_id": matched_rule.get("id") if matched_rule else None,
+                            "via_llm": bool(matched_rule and matched_rule.get("use_llm")),
                         })
                     except Exception as e:
                         logger.error(f"Auto-reply failed: {e}")

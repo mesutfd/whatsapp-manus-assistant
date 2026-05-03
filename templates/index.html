@@ -3,13 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>iDeep WhatsApp Bot - Control Panel</title>
+    <title>iDeep WhatsApp Bot — Control Panel</title>
     <link rel="stylesheet" href="/static/css/style.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 </head>
 <body>
     <div class="app-container">
+
         <!-- Header -->
         <header class="app-header">
             <div class="header-left">
@@ -17,7 +18,7 @@
                     <span class="logo-icon">&#9889;</span>
                     <h1>iDeep WhatsApp Bot</h1>
                 </div>
-                <span class="version-badge">v1.0.0</span>
+                <span class="version-badge">v1.2.0</span>
             </div>
             <div class="header-right">
                 <div class="connection-indicator" id="connectionIndicator">
@@ -51,23 +52,24 @@
 
         <!-- Main Dashboard -->
         <div class="screen" id="dashboardScreen" style="display:none;">
-            <!-- Navigation Tabs -->
+
+            <!-- Tabs -->
             <nav class="tab-nav">
                 <button class="tab-btn active" data-tab="connection">Connection</button>
                 <button class="tab-btn" data-tab="messages">Messages</button>
                 <button class="tab-btn" data-tab="assistant">Assistant</button>
+                <button class="tab-btn" data-tab="schedule">Schedule</button>
                 <button class="tab-btn" data-tab="settings">Settings</button>
             </nav>
 
-            <!-- Connection Tab -->
+            <!-- ─── Connection Tab ─────────────────────────────────────── -->
             <div class="tab-content active" id="tab-connection">
                 <div class="panel-grid">
-                    <!-- QR Code Panel -->
                     <div class="panel qr-panel">
                         <h3>WhatsApp Login</h3>
                         <div class="qr-container" id="qrContainer">
                             <div class="qr-placeholder" id="qrPlaceholder">
-                                <p>Click "Connect" to generate QR code</p>
+                                <p>Click "Connect" to generate a QR code</p>
                             </div>
                             <img id="qrImage" class="qr-image" style="display:none;" alt="QR Code">
                             <div class="connected-badge" id="connectedBadge" style="display:none;">
@@ -80,9 +82,9 @@
                             <button class="btn btn-danger" id="disconnectBtn" style="display:none;">Disconnect</button>
                             <button class="btn btn-outline" id="relinkBtn" style="display:none;" title="Wipe the saved session and scan a fresh QR (use this to switch WhatsApp accounts)">Re-link / Switch Account</button>
                         </div>
-                        <p class="qr-hint" id="qrHint" style="font-size:12px;color:var(--text-muted);margin-top:8px;"></p>
+                        <p class="field-hint" id="qrHint"></p>
                         <div class="pair-code-section">
-                            <h4>Or use Pair Code</h4>
+                            <h4>Or use a pair code</h4>
                             <div class="pair-code-form">
                                 <input type="text" id="phoneInput" placeholder="Phone with country code (e.g., 989123456789)">
                                 <button class="btn btn-secondary" id="pairCodeBtn">Get Code</button>
@@ -93,32 +95,16 @@
                         </div>
                     </div>
 
-                    <!-- Status Panel -->
                     <div class="panel status-panel">
                         <h3>Status</h3>
                         <div class="status-grid">
-                            <div class="status-item">
-                                <span class="status-label">State</span>
-                                <span class="status-value" id="statusState">-</span>
-                            </div>
-                            <div class="status-item">
-                                <span class="status-label">Connected Since</span>
-                                <span class="status-value" id="statusConnectedAt">-</span>
-                            </div>
-                            <div class="status-item">
-                                <span class="status-label">Messages Stored</span>
-                                <span class="status-value" id="statusMessages">0</span>
-                            </div>
-                            <div class="status-item">
-                                <span class="status-label">Auto-Reply</span>
-                                <span class="status-value" id="statusAutoReply">Disabled</span>
-                            </div>
-                            <div class="status-item">
-                                <span class="status-label">Contacts Cached</span>
-                                <span class="status-value" id="statusContacts">0</span>
-                            </div>
+                            <div class="status-item"><span class="status-label">State</span><span class="status-value" id="statusState">-</span></div>
+                            <div class="status-item"><span class="status-label">Connected since</span><span class="status-value" id="statusConnectedAt">-</span></div>
+                            <div class="status-item"><span class="status-label">Messages stored</span><span class="status-value" id="statusMessages">0</span></div>
+                            <div class="status-item"><span class="status-label">Auto-reply</span><span class="status-value" id="statusAutoReply">Disabled</span></div>
+                            <div class="status-item"><span class="status-label">Contacts cached</span><span class="status-value" id="statusContacts">0</span></div>
                         </div>
-                        <h4 class="mt-2">API Integration</h4>
+                        <h4 class="mt-3">API integration</h4>
                         <div class="code-block">
                             <code>
                                 curl -H "X-API-Key: YOUR_KEY" \<br>
@@ -130,15 +116,13 @@
                 </div>
             </div>
 
-            <!-- Messages Tab -->
+            <!-- ─── Messages Tab ───────────────────────────────────────── -->
             <div class="tab-content" id="tab-messages">
                 <div class="panel">
-                    <div class="panel-header">
-                        <h3>Send Message</h3>
-                    </div>
+                    <div class="panel-header"><h3>Send Message</h3></div>
                     <form id="sendMessageForm" class="message-form">
                         <div class="form-row">
-                            <div class="form-group">
+                            <div class="form-group" style="flex:1; margin:0;">
                                 <label>Phone Number</label>
                                 <input type="text" id="msgPhone" placeholder="989123456789">
                             </div>
@@ -152,9 +136,7 @@
                 </div>
 
                 <div class="panel mt-2">
-                    <div class="panel-header">
-                        <h3>Search Messages</h3>
-                    </div>
+                    <div class="panel-header"><h3>Search Messages</h3></div>
                     <form id="searchForm" class="search-form">
                         <div class="form-row">
                             <input type="text" id="searchQuery" placeholder="Search messages...">
@@ -174,84 +156,263 @@
                 </div>
             </div>
 
-            <!-- Assistant Tab -->
+            <!-- ─── Assistant Tab ──────────────────────────────────────── -->
             <div class="tab-content" id="tab-assistant">
+
+                <!-- Core toggle + identity -->
                 <div class="panel">
                     <div class="panel-header">
-                        <h3>iDeep AI Assistant Configuration</h3>
+                        <h3>Auto-Reply</h3>
+                        <span class="llm-chip" id="llmChip"><span>LLM:</span><strong id="llmChipText">none</strong></span>
                     </div>
+                    <p class="panel-subtitle">Auto-replies fire on incoming 1-on-1 chats. Group messages are ignored.</p>
+
                     <form id="assistantForm">
-                        <div class="form-group toggle-group">
-                            <label>Auto-Reply Enabled</label>
+                        <div class="toggle-group">
+                            <label>Auto-Reply enabled</label>
                             <label class="toggle">
                                 <input type="checkbox" id="autoReplyEnabled">
                                 <span class="toggle-slider"></span>
                             </label>
                         </div>
+
                         <div class="form-group">
-                            <label>Assistant Name</label>
+                            <label>Assistant name</label>
                             <input type="text" id="assistantName" value="iDeep AI">
                         </div>
                         <div class="form-group">
-                            <label>Default Reply Message</label>
-                            <textarea id="autoReplyMessage" rows="3">Hi, I am iDeep AI Assistant. Alireza is not available right now, but he would be available soon and will get back to you.</textarea>
+                            <label>Default reply (used when a rule has no message and LLM is off)</label>
+                            <textarea id="autoReplyMessage" rows="3" placeholder="Hi, I'll get back to you shortly..."></textarea>
                         </div>
-                        <button type="submit" class="btn btn-primary">Save Configuration</button>
+
+                        <!-- LLM section -->
+                        <div class="subpanel">
+                            <div class="subpanel-title">LLM-powered replies</div>
+                            <p class="field-hint" style="margin-bottom:10px;">
+                                Provider and model are read from <code>.env</code>
+                                (<code>LLM_PROVIDER</code>, <code>LLM_MODEL</code>, <code>LLM_API_KEY</code>).
+                                Restart the server after changing them.
+                            </p>
+                            <div class="toggle-group">
+                                <label>Use LLM by default for auto-replies</label>
+                                <label class="toggle">
+                                    <input type="checkbox" id="llmEnabled">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="form-group" style="margin-bottom:0;">
+                                <label>System prompt</label>
+                                <textarea id="llmSystemPrompt" rows="3" placeholder="You are iDeep AI Assistant, replying on behalf of the user on WhatsApp..."></textarea>
+                                <p class="field-hint">Per-contact personas (below) can override this prompt.</p>
+                            </div>
+                        </div>
+
+                        <!-- Quiet hours -->
+                        <div class="subpanel">
+                            <div class="subpanel-title">Quiet hours</div>
+                            <div class="toggle-group">
+                                <label>Enable quiet hours</label>
+                                <label class="toggle">
+                                    <input type="checkbox" id="quietEnabled">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group" style="margin:0;">
+                                    <label>Start (HH:MM)</label>
+                                    <input type="time" id="quietStart" value="22:00">
+                                </div>
+                                <div class="form-group" style="margin:0;">
+                                    <label>End (HH:MM)</label>
+                                    <input type="time" id="quietEnd" value="08:00">
+                                </div>
+                                <div class="form-group" style="margin:0;">
+                                    <label>Timezone (IANA)</label>
+                                    <input type="text" id="quietTz" placeholder="Europe/Istanbul">
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label>Away message during quiet hours (leave blank to stay silent)</label>
+                                <textarea id="quietMessage" rows="2" placeholder="I'm asleep right now — I'll reply in the morning."></textarea>
+                            </div>
+                            <div class="toggle-group" style="margin-bottom:0;">
+                                <label>Defer scheduled sends until window closes</label>
+                                <label class="toggle">
+                                    <input type="checkbox" id="quietDefer" checked>
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <button type="submit" class="btn btn-primary mt-2">Save configuration</button>
+                    </form>
+                </div>
+
+                <!-- Auto-reply rules -->
+                <div class="panel mt-2">
+                    <div class="panel-header">
+                        <h3>Auto-Reply Rules</h3>
+                        <button class="btn btn-sm btn-primary" id="addRuleBtn">+ Add Rule</button>
+                    </div>
+                    <p class="panel-subtitle">Rules are evaluated by priority (lowest first). The first match wins.</p>
+
+                    <div id="rulesList" class="list-block"></div>
+
+                    <div class="add-form" id="addRuleForm" style="display:none;">
+                        <div class="form-row">
+                            <div class="form-group" style="margin:0;">
+                                <label>Contact (JID or phone, optional)</label>
+                                <input type="text" id="ruleContact" placeholder="989123456789">
+                            </div>
+                            <div class="form-group" style="margin:0;">
+                                <label>Keyword (optional)</label>
+                                <input type="text" id="ruleKeyword" placeholder="rabbit">
+                            </div>
+                            <div class="form-group" style="margin:0;">
+                                <label>Match mode</label>
+                                <select id="ruleMatchMode">
+                                    <option value="contains">Contains</option>
+                                    <option value="exact">Exact</option>
+                                    <option value="starts_with">Starts with</option>
+                                    <option value="regex">Regex</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>Reply message (leave blank if Use LLM is on)</label>
+                            <textarea id="ruleMessage" rows="2" placeholder="Follow the white rabbit..."></textarea>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group" style="margin:0;">
+                                <label>Cooldown (seconds, per contact)</label>
+                                <input type="number" id="ruleCooldown" min="0" value="0">
+                            </div>
+                            <div class="form-group" style="margin:0;">
+                                <label>Priority (lower = earlier)</label>
+                                <input type="number" id="rulePriority" min="0" value="100">
+                            </div>
+                            <div class="toggle-group" style="flex:1; margin:0;">
+                                <label>Use LLM</label>
+                                <label class="toggle">
+                                    <input type="checkbox" id="ruleUseLlm">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                        </div>
+                        <div style="display:flex; gap:8px; margin-top:10px;">
+                            <button type="button" class="btn btn-primary" id="saveRuleBtn">Save Rule</button>
+                            <button type="button" class="btn btn-outline" id="cancelRuleBtn">Cancel</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Contact personas -->
+                <div class="panel mt-2">
+                    <div class="panel-header">
+                        <h3>Contact Personas</h3>
+                        <button class="btn btn-sm btn-primary" id="addPersonaBtn">+ Add Persona</button>
+                    </div>
+                    <p class="panel-subtitle">Per-contact context fed into the LLM. Use this to make replies sound right for specific people.</p>
+
+                    <div id="personasList" class="list-block"></div>
+
+                    <div class="add-form" id="addPersonaForm" style="display:none;">
+                        <div class="form-row">
+                            <div class="form-group" style="margin:0;">
+                                <label>Contact (JID or phone)</label>
+                                <input type="text" id="personaContact" placeholder="989123456789">
+                            </div>
+                            <div class="form-group" style="margin:0;">
+                                <label>Display name</label>
+                                <input type="text" id="personaName" placeholder="Masoud">
+                            </div>
+                            <div class="toggle-group" style="flex:1; margin:0;">
+                                <label>LLM enabled</label>
+                                <label class="toggle">
+                                    <input type="checkbox" id="personaUseLlm" checked>
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>Notes (mixed into the system prompt)</label>
+                            <textarea id="personaNotes" rows="2" placeholder="Old friend; speak casually in Persian; he runs a print shop."></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label>System prompt override (optional, replaces the global one)</label>
+                            <textarea id="personaSystemPrompt" rows="2" placeholder="Leave blank to use the default system prompt..."></textarea>
+                        </div>
+                        <div style="display:flex; gap:8px;">
+                            <button type="button" class="btn btn-primary" id="savePersonaBtn">Save Persona</button>
+                            <button type="button" class="btn btn-outline" id="cancelPersonaBtn">Cancel</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ─── Schedule Tab ───────────────────────────────────────── -->
+            <div class="tab-content" id="tab-schedule">
+                <div class="panel">
+                    <div class="panel-header"><h3>Schedule a Message</h3></div>
+                    <p class="panel-subtitle">The scheduler fires every <code id="schedulerPoll">20</code> seconds. During quiet hours, sends defer until the window closes.</p>
+                    <form id="scheduleForm">
+                        <div class="form-row">
+                            <div class="form-group" style="margin:0;">
+                                <label>Phone number</label>
+                                <input type="text" id="schedulePhone" placeholder="989123456789">
+                            </div>
+                            <div class="form-group" style="margin:0;">
+                                <label>Send at (your local time)</label>
+                                <input type="datetime-local" id="scheduleAt">
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>Message</label>
+                            <textarea id="scheduleMessage" rows="3" placeholder="Reminder..."></textarea>
+                        </div>
+                        <button type="submit" class="btn btn-primary">Schedule Send</button>
                     </form>
                 </div>
 
                 <div class="panel mt-2">
                     <div class="panel-header">
-                        <h3>Auto-Reply Rules</h3>
-                        <button class="btn btn-sm btn-primary" id="addRuleBtn">Add Rule</button>
+                        <h3>Pending</h3>
+                        <button class="btn btn-sm btn-outline" id="refreshScheduledBtn">Refresh</button>
                     </div>
-                    <div id="rulesList" class="rules-list"></div>
-                    <div class="add-rule-form" id="addRuleForm" style="display:none;">
-                        <div class="form-row">
-                            <input type="text" id="ruleContact" placeholder="Contact (optional)">
-                            <input type="text" id="ruleKeyword" placeholder="Keyword trigger (optional)">
-                        </div>
-                        <div class="form-group">
-                            <textarea id="ruleMessage" rows="2" placeholder="Reply message"></textarea>
-                        </div>
-                        <button class="btn btn-secondary" id="saveRuleBtn">Save Rule</button>
-                    </div>
+                    <div id="scheduledPendingList" class="list-block"></div>
+                </div>
+
+                <div class="panel mt-2">
+                    <div class="panel-header"><h3>History</h3></div>
+                    <div id="scheduledHistoryList" class="list-block"></div>
                 </div>
             </div>
 
-            <!-- Settings Tab -->
+            <!-- ─── Settings Tab ───────────────────────────────────────── -->
             <div class="tab-content" id="tab-settings">
                 <div class="panel">
-                    <div class="panel-header">
-                        <h3>API Configuration</h3>
-                    </div>
+                    <div class="panel-header"><h3>API Configuration</h3></div>
                     <div class="settings-info">
-                        <div class="info-item">
-                            <span class="info-label">API Base URL</span>
-                            <code id="apiBaseUrl">http://localhost:8000</code>
-                        </div>
-                        <div class="info-item">
-                            <span class="info-label">API Docs</span>
-                            <a href="/docs" target="_blank">/docs (Swagger UI)</a>
-                        </div>
-                        <div class="info-item">
-                            <span class="info-label">ReDoc</span>
-                            <a href="/redoc" target="_blank">/redoc (ReDoc)</a>
-                        </div>
-                        <div class="info-item">
-                            <span class="info-label">Health Check</span>
-                            <a href="/health" target="_blank">/health</a>
-                        </div>
+                        <div class="info-item"><span class="info-label">API Base URL</span><code id="apiBaseUrl">http://localhost:8000</code></div>
+                        <div class="info-item"><span class="info-label">API Docs</span><a href="/docs" target="_blank">/docs (Swagger UI)</a></div>
+                        <div class="info-item"><span class="info-label">ReDoc</span><a href="/redoc" target="_blank">/redoc</a></div>
+                        <div class="info-item"><span class="info-label">Health Check</span><a href="/health" target="_blank">/health</a></div>
                     </div>
+                </div>
+
+                <div class="panel mt-2">
+                    <div class="panel-header"><h3>LLM Provider</h3></div>
+                    <div class="settings-info" id="llmInfoList"></div>
+                    <p class="field-hint mt-2">Change provider/model/key in <code>.env</code> and restart. Supported: <code>openai</code>, <code>anthropic</code>.</p>
                 </div>
 
                 <div class="panel mt-2">
                     <div class="panel-header">
                         <h3>Webhooks</h3>
-                        <button class="btn btn-sm btn-primary" id="addWebhookBtn">Add Webhook</button>
+                        <button class="btn btn-sm btn-primary" id="addWebhookBtn">+ Add Webhook</button>
                     </div>
-                    <div id="webhooksList" class="webhooks-list"></div>
-                    <div class="add-webhook-form" id="addWebhookForm" style="display:none;">
+                    <div id="webhooksList" class="list-block"></div>
+                    <div class="add-form" id="addWebhookForm" style="display:none;">
                         <div class="form-group">
                             <input type="text" id="webhookUrl" placeholder="Webhook URL (https://...)">
                         </div>
@@ -266,32 +427,27 @@
                 </div>
 
                 <div class="panel mt-2">
-                    <div class="panel-header">
-                        <h3>Manus Integration</h3>
-                    </div>
+                    <div class="panel-header"><h3>Manus Integration</h3></div>
                     <div class="manus-info">
-                        <p>To integrate with Manus AI, configure an MCP server or use the HTTP API directly.</p>
+                        <p>Configure an MCP server or use the HTTP API directly.</p>
                         <div class="code-block">
-                            <pre>
-# Example: Manus reading your chats
+<pre># Manus reading chats
 GET /api/v1/messages/chats
 Header: X-API-Key: your_api_key
 
-# Example: Manus searching messages
+# Manus searching messages
 POST /api/v1/messages/search
 Body: {"query": "date with Masoud", "contact": "Masoud Nayebi"}
 
-# Example: Manus replying as assistant
+# Manus replying as assistant
 POST /api/v1/assistant/reply-as-assistant
-Body: {"phone": "989...", "message": "Hi, Alireza will contact you soon."}
-                            </pre>
+Body: {"phone": "989...", "message": "Hi, Alireza will contact you soon."}</pre>
                         </div>
                     </div>
                 </div>
             </div>
         </div>
 
-        <!-- Toast Notifications -->
         <div class="toast-container" id="toastContainer"></div>
     </div>
 

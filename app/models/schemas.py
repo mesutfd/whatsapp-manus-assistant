@@ -201,24 +201,98 @@ class AutoReplyRule(BaseModel):
     """A single auto-reply rule."""
     contact: Optional[str] = Field(None, description="Contact JID or phone to match")
     keyword: Optional[str] = Field(None, description="Keyword trigger in message")
-    message: str = Field(..., description="Reply message to send")
+    match_mode: str = Field("contains", description="contains | exact | starts_with | regex")
+    message: str = Field("", description="Reply message (leave empty to use LLM only)")
+    use_llm: bool = Field(False, description="Generate reply via LLM instead of static text")
+    cooldown_seconds: int = Field(0, description="Minimum seconds between firings per contact")
     enabled: bool = True
+    priority: int = Field(100, description="Lower runs first")
+
+
+class AutoReplyRuleUpdate(BaseModel):
+    """Partial update payload for a rule."""
+    contact: Optional[str] = None
+    keyword: Optional[str] = None
+    match_mode: Optional[str] = None
+    message: Optional[str] = None
+    use_llm: Optional[bool] = None
+    cooldown_seconds: Optional[int] = None
+    enabled: Optional[bool] = None
+    priority: Optional[int] = None
+
+
+class QuietHoursConfig(BaseModel):
+    """Quiet-hours window."""
+    enabled: bool = False
+    start: str = Field("22:00", description="HH:MM (24h)")
+    end: str = Field("08:00", description="HH:MM (24h); window may cross midnight")
+    timezone: str = Field("UTC", description="IANA timezone, e.g. Europe/Istanbul")
+    message: str = Field("", description="Optional away reply during quiet hours; blank = silent")
+    defer_scheduled: bool = Field(True, description="Hold scheduled sends until window closes")
 
 
 class AutoReplyConfig(BaseModel):
-    """Auto-reply configuration."""
-    enabled: bool = Field(..., description="Enable/disable auto-reply globally")
+    """Auto-reply configuration update payload."""
+    enabled: Optional[bool] = None
     message: Optional[str] = Field(None, description="Default auto-reply message")
-    assistant_name: Optional[str] = Field(None, description="Assistant name in replies")
-    rules: Optional[List[AutoReplyRule]] = Field(None, description="Custom reply rules")
+    assistant_name: Optional[str] = None
+    llm_enabled: Optional[bool] = None
+    llm_system_prompt: Optional[str] = None
+    quiet_hours: Optional[QuietHoursConfig] = None
 
 
 class AutoReplyStatus(BaseModel):
-    """Current auto-reply status."""
+    """Current auto-reply status snapshot."""
     enabled: bool
     message: str
     assistant_name: str
+    llm_enabled: bool = False
+    llm_system_prompt: str = ""
+    quiet_hours: Dict[str, Any] = {}
     rules: List[Dict[str, Any]] = []
+
+
+class LLMInfo(BaseModel):
+    """Read-only view of the configured LLM provider."""
+    provider: str
+    model: str
+    configured: bool
+    has_api_key: bool
+    base_url: str = ""
+
+
+# ─── Contact persona ─────────────────────────────────────────────────────────
+
+
+class ContactPersona(BaseModel):
+    """Per-contact context fed into the LLM system prompt."""
+    contact: str = Field(..., description="JID or phone digits")
+    display_name: Optional[str] = None
+    notes: Optional[str] = Field(None, description="Free-form context about this contact")
+    system_prompt_override: Optional[str] = Field(None, description="Full override of system prompt")
+    use_llm: bool = True
+
+
+# ─── Scheduled sends ─────────────────────────────────────────────────────────
+
+
+class ScheduledSendCreate(BaseModel):
+    """Schedule a message for future delivery."""
+    phone: str = Field(..., description="Phone with country code, no '+'")
+    message: str
+    scheduled_at: str = Field(..., description="ISO 8601 datetime; treated as UTC if no offset")
+
+
+class ScheduledSendInfo(BaseModel):
+    """A scheduled send record."""
+    id: int
+    phone: str
+    message: str
+    scheduled_at: str
+    status: str
+    sent_at: Optional[str] = None
+    error: Optional[str] = None
+    created_at: Optional[str] = None
 
 
 # ─── Webhook Models ──────────────────────────────────────────────────────────

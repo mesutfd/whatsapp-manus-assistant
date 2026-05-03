@@ -22,9 +22,12 @@ from app.api.assistant import router as assistant_router
 from app.api.connection import router as connection_router
 from app.api.contacts import router as contacts_router
 from app.api.messages import router as messages_router
+from app.api.schedule import router as schedule_router
 from app.api.webhooks import router as webhooks_router
 from app.api.smart import router as smart_router
 from app.core.config import settings
+from app.core.database import db
+from app.core.scheduler import scheduler
 from app.core.webhooks import webhook_service
 from app.core.whatsapp_client import wa_client
 
@@ -60,8 +63,14 @@ async def lifespan(app: FastAPI):
     Path(settings.WA_STORE_PATH).mkdir(parents=True, exist_ok=True)
     Path(settings.MESSAGE_STORE_DB).parent.mkdir(parents=True, exist_ok=True)
 
-    # Initialize WhatsApp client
+    # Initialize app DB (rules, personas, scheduled sends, quiet hours)
+    await db.initialize()
+
+    # Initialize WhatsApp client (will sync settings from the DB)
     await wa_client.initialize()
+
+    # Start scheduled-send service
+    await scheduler.start()
 
     # Start webhook service
     await webhook_service.start()
@@ -83,6 +92,7 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info("Shutting down services...")
+    await scheduler.stop()
     await wa_client.disconnect()
     await webhook_service.stop()
     logger.info("All services stopped. Goodbye!")
@@ -155,6 +165,7 @@ app.include_router(connection_router)
 app.include_router(messages_router)
 app.include_router(contacts_router)
 app.include_router(assistant_router)
+app.include_router(schedule_router)
 app.include_router(webhooks_router)
 app.include_router(smart_router)
 
@@ -212,6 +223,7 @@ async def api_info():
             "messages": "/api/v1/messages",
             "contacts": "/api/v1/contacts",
             "assistant": "/api/v1/assistant",
+            "schedule": "/api/v1/schedule",
             "webhooks": "/api/v1/webhooks",
             "health": "/health",
         },
