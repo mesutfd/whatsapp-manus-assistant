@@ -1,0 +1,180 @@
+{
+  "name": "whatsapp-ideep",
+  "description": "iDeep WhatsApp Bot API - Read chats, send messages by contact NAME (fuzzy matched), manage auto-reply assistant via WhatsApp. Supports natural language contact resolution.",
+  "version": "1.1.0",
+  "transport": {
+    "type": "http",
+    "base_url": "http://YOUR_SERVER_IP:8000",
+    "headers": {
+      "X-API-Key": "YOUR_API_KEY_HERE"
+    }
+  },
+  "tools": [
+    {
+      "name": "whatsapp_smart_send",
+      "description": "PREFERRED: Send a WhatsApp message using contact NAME (fuzzy matched) or phone number. Handles partial names: 'Masoud Nayebi' will match 'Masoud Nayebi-Tech Assistant'. Can also send as iDeep AI Assistant.",
+      "method": "POST",
+      "path": "/api/v1/smart/send",
+      "parameters": {
+        "to": {
+          "type": "string",
+          "description": "Contact name OR phone number. Fuzzy matched. Examples: 'Masoud Nayebi', 'Mom', '989123456789'",
+          "required": true
+        },
+        "message": {
+          "type": "string",
+          "description": "Message text to send",
+          "required": true
+        },
+        "as_assistant": {
+          "type": "boolean",
+          "description": "If true, sends as iDeep AI Assistant with name prefix. Default: false",
+          "required": false
+        }
+      }
+    },
+    {
+      "name": "whatsapp_smart_search",
+      "description": "PREFERRED: Search WhatsApp messages with natural language query and optional contact name (fuzzy matched). Use for queries like 'when was my date with Masoud?' or 'what did Mom say about dinner?'",
+      "method": "POST",
+      "path": "/api/v1/smart/search",
+      "parameters": {
+        "query": {
+          "type": "string",
+          "description": "What to search for (e.g., 'date with Masoud', 'meeting tomorrow', 'flight booking')",
+          "required": true
+        },
+        "contact": {
+          "type": "string",
+          "description": "Contact name to filter by (fuzzy matched). E.g., 'Masoud Nayebi' matches 'Masoud Nayebi-Tech Assistant'",
+          "required": false
+        },
+        "limit": {
+          "type": "number",
+          "description": "Max results to return. Default: 20",
+          "required": false
+        }
+      }
+    },
+    {
+      "name": "whatsapp_resolve_contact",
+      "description": "Resolve a contact name to phone number using fuzzy matching. Returns ranked matches with confidence scores. Use when you need to confirm which contact the user means.",
+      "method": "POST",
+      "path": "/api/v1/smart/resolve",
+      "parameters": {
+        "name": {
+          "type": "string",
+          "description": "Contact name to look up (fuzzy matched). E.g., 'Masoud' or 'Masoud Nayebi'",
+          "required": true
+        }
+      }
+    },
+    {
+      "name": "whatsapp_recent_messages",
+      "description": "Get the most recent incoming WhatsApp messages. Quick way to check 'what's new on WhatsApp?'",
+      "method": "GET",
+      "path": "/api/v1/smart/recent",
+      "parameters": {
+        "count": {
+          "type": "number",
+          "description": "Number of recent messages to return. Default: 10",
+          "required": false
+        }
+      }
+    },
+    {
+      "name": "whatsapp_get_status",
+      "description": "Get WhatsApp connection status and service health",
+      "method": "GET",
+      "path": "/api/v1/connection/status"
+    },
+    {
+      "name": "whatsapp_get_chats",
+      "description": "Get all recent WhatsApp chats with last message preview",
+      "method": "GET",
+      "path": "/api/v1/messages/chats"
+    },
+    {
+      "name": "whatsapp_send_message_direct",
+      "description": "Send a WhatsApp message directly to a phone number (use whatsapp_smart_send instead if you have a contact name)",
+      "method": "POST",
+      "path": "/api/v1/messages/send",
+      "parameters": {
+        "phone": {
+          "type": "string",
+          "description": "Phone number with country code, no + (e.g., 989123456789)",
+          "required": true
+        },
+        "message": {
+          "type": "string",
+          "description": "Message text to send",
+          "required": true
+        }
+      }
+    },
+    {
+      "name": "whatsapp_reply_as_assistant",
+      "description": "Send a reply as iDeep AI Assistant on behalf of the user. Use when user asks to reply to someone as their assistant.",
+      "method": "POST",
+      "path": "/api/v1/assistant/reply-as-assistant",
+      "parameters": {
+        "phone": {
+          "type": "string",
+          "description": "Phone number to reply to",
+          "required": true
+        },
+        "message": {
+          "type": "string",
+          "description": "Assistant reply message",
+          "required": true
+        },
+        "context": {
+          "type": "string",
+          "description": "Context about why this reply is being sent",
+          "required": false
+        }
+      }
+    },
+    {
+      "name": "whatsapp_get_contacts",
+      "description": "Get all WhatsApp contacts",
+      "method": "GET",
+      "path": "/api/v1/contacts/"
+    },
+    {
+      "name": "whatsapp_get_groups",
+      "description": "Get all WhatsApp groups",
+      "method": "GET",
+      "path": "/api/v1/contacts/groups"
+    },
+    {
+      "name": "whatsapp_get_unread",
+      "description": "Get unread/recent incoming messages",
+      "method": "GET",
+      "path": "/api/v1/messages/unread"
+    },
+    {
+      "name": "whatsapp_configure_assistant",
+      "description": "Enable/disable auto-reply and configure the iDeep AI Assistant behavior",
+      "method": "PUT",
+      "path": "/api/v1/assistant/config",
+      "parameters": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable or disable auto-reply",
+          "required": true
+        },
+        "message": {
+          "type": "string",
+          "description": "Default auto-reply message",
+          "required": false
+        },
+        "assistant_name": {
+          "type": "string",
+          "description": "Name of the assistant (default: iDeep AI)",
+          "required": false
+        }
+      }
+    }
+  ]
+}

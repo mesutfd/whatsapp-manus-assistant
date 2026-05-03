@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>iDeep WhatsApp Bot - Control Panel</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <div class="header-left">
+                <div class="logo">
+                    <span class="logo-icon">&#9889;</span>
+                    <h1>iDeep WhatsApp Bot</h1>
+                </div>
+                <span class="version-badge">v1.0.0</span>
+            </div>
+            <div class="header-right">
+                <div class="connection-indicator" id="connectionIndicator">
+                    <span class="status-dot"></span>
+                    <span class="status-text">Disconnected</span>
+                </div>
+                <button class="btn btn-sm btn-outline" id="logoutBtn" style="display:none;">Logout</button>
+            </div>
+        </header>
+
+        <!-- Login Screen -->
+        <div class="screen" id="loginScreen">
+            <div class="login-card">
+                <div class="login-header">
+                    <span class="login-icon">&#128274;</span>
+                    <h2>Authentication Required</h2>
+                    <p>Enter your API key to access the control panel</p>
+                </div>
+                <form id="loginForm">
+                    <div class="form-group">
+                        <label for="apiKeyInput">API Key</label>
+                        <input type="password" id="apiKeyInput" placeholder="Enter your API key..." autocomplete="off">
+                    </div>
+                    <button type="submit" class="btn btn-primary btn-full">Authenticate</button>
+                </form>
+                <div class="login-footer">
+                    <p>Find your API key in the <code>.env</code> file</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Main Dashboard -->
+        <div class="screen" id="dashboardScreen" style="display:none;">
+            <!-- Navigation Tabs -->
+            <nav class="tab-nav">
+                <button class="tab-btn active" data-tab="connection">Connection</button>
+                <button class="tab-btn" data-tab="messages">Messages</button>
+                <button class="tab-btn" data-tab="assistant">Assistant</button>
+                <button class="tab-btn" data-tab="settings">Settings</button>
+            </nav>
+
+            <!-- Connection Tab -->
+            <div class="tab-content active" id="tab-connection">
+                <div class="panel-grid">
+                    <!-- QR Code Panel -->
+                    <div class="panel qr-panel">
+                        <h3>WhatsApp Login</h3>
+                        <div class="qr-container" id="qrContainer">
+                            <div class="qr-placeholder" id="qrPlaceholder">
+                                <p>Click "Connect" to generate QR code</p>
+                            </div>
+                            <img id="qrImage" class="qr-image" style="display:none;" alt="QR Code">
+                            <div class="connected-badge" id="connectedBadge" style="display:none;">
+                                <span>&#10004;</span>
+                                <p>Connected</p>
+                            </div>
+                        </div>
+                        <div class="qr-actions">
+                            <button class="btn btn-primary" id="connectBtn">Connect</button>
+                            <button class="btn btn-danger" id="disconnectBtn" style="display:none;">Disconnect</button>
+                            <button class="btn btn-outline" id="relinkBtn" style="display:none;" title="Wipe the saved session and scan a fresh QR (use this to switch WhatsApp accounts)">Re-link / Switch Account</button>
+                        </div>
+                        <p class="qr-hint" id="qrHint" style="font-size:12px;color:var(--text-muted);margin-top:8px;"></p>
+                        <div class="pair-code-section">
+                            <h4>Or use Pair Code</h4>
+                            <div class="pair-code-form">
+                                <input type="text" id="phoneInput" placeholder="Phone with country code (e.g., 989123456789)">
+                                <button class="btn btn-secondary" id="pairCodeBtn">Get Code</button>
+                            </div>
+                            <div class="pair-code-display" id="pairCodeDisplay" style="display:none;">
+                                <span id="pairCodeValue"></span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Status Panel -->
+                    <div class="panel status-panel">
+                        <h3>Status</h3>
+                        <div class="status-grid">
+                            <div class="status-item">
+                                <span class="status-label">State</span>
+                                <span class="status-value" id="statusState">-</span>
+                            </div>
+                            <div class="status-item">
+                                <span class="status-label">Connected Since</span>
+                                <span class="status-value" id="statusConnectedAt">-</span>
+                            </div>
+                            <div class="status-item">
+                                <span class="status-label">Messages Stored</span>
+                                <span class="status-value" id="statusMessages">0</span>
+                            </div>
+                            <div class="status-item">
+                                <span class="status-label">Auto-Reply</span>
+                                <span class="status-value" id="statusAutoReply">Disabled</span>
+                            </div>
+                            <div class="status-item">
+                                <span class="status-label">Contacts Cached</span>
+                                <span class="status-value" id="statusContacts">0</span>
+                            </div>
+                        </div>
+                        <h4 class="mt-2">API Integration</h4>
+                        <div class="code-block">
+                            <code>
+                                curl -H "X-API-Key: YOUR_KEY" \<br>
+                                &nbsp;&nbsp;http://localhost:8000/api/v1/messages/send \<br>
+                                &nbsp;&nbsp;-d '{"phone":"989...", "message":"Hello!"}'
+                            </code>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Messages Tab -->
+            <div class="tab-content" id="tab-messages">
+                <div class="panel">
+                    <div class="panel-header">
+                        <h3>Send Message</h3>
+                    </div>
+                    <form id="sendMessageForm" class="message-form">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Phone Number</label>
+                                <input type="text" id="msgPhone" placeholder="989123456789">
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>Message</label>
+                            <textarea id="msgText" rows="3" placeholder="Type your message..."></textarea>
+                        </div>
+                        <button type="submit" class="btn btn-primary">Send Message</button>
+                    </form>
+                </div>
+
+                <div class="panel mt-2">
+                    <div class="panel-header">
+                        <h3>Search Messages</h3>
+                    </div>
+                    <form id="searchForm" class="search-form">
+                        <div class="form-row">
+                            <input type="text" id="searchQuery" placeholder="Search messages...">
+                            <input type="text" id="searchContact" placeholder="Contact filter (optional)">
+                            <button type="submit" class="btn btn-secondary">Search</button>
+                        </div>
+                    </form>
+                    <div class="message-list" id="searchResults"></div>
+                </div>
+
+                <div class="panel mt-2">
+                    <div class="panel-header">
+                        <h3>Recent Messages</h3>
+                        <button class="btn btn-sm btn-outline" id="refreshMessages">Refresh</button>
+                    </div>
+                    <div class="message-list" id="messageList"></div>
+                </div>
+            </div>
+
+            <!-- Assistant Tab -->
+            <div class="tab-content" id="tab-assistant">
+                <div class="panel">
+                    <div class="panel-header">
+                        <h3>iDeep AI Assistant Configuration</h3>
+                    </div>
+                    <form id="assistantForm">
+                        <div class="form-group toggle-group">
+                            <label>Auto-Reply Enabled</label>
+                            <label class="toggle">
+                                <input type="checkbox" id="autoReplyEnabled">
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label>Assistant Name</label>
+                            <input type="text" id="assistantName" value="iDeep AI">
+                        </div>
+                        <div class="form-group">
+                            <label>Default Reply Message</label>
+                            <textarea id="autoReplyMessage" rows="3">Hi, I am iDeep AI Assistant. Alireza is not available right now, but he would be available soon and will get back to you.</textarea>
+                        </div>
+                        <button type="submit" class="btn btn-primary">Save Configuration</button>
+                    </form>
+                </div>
+
+                <div class="panel mt-2">
+                    <div class="panel-header">
+                        <h3>Auto-Reply Rules</h3>
+                        <button class="btn btn-sm btn-primary" id="addRuleBtn">Add Rule</button>
+                    </div>
+                    <div id="rulesList" class="rules-list"></div>
+                    <div class="add-rule-form" id="addRuleForm" style="display:none;">
+                        <div class="form-row">
+                            <input type="text" id="ruleContact" placeholder="Contact (optional)">
+                            <input type="text" id="ruleKeyword" placeholder="Keyword trigger (optional)">
+                        </div>
+                        <div class="form-group">
+                            <textarea id="ruleMessage" rows="2" placeholder="Reply message"></textarea>
+                        </div>
+                        <button class="btn btn-secondary" id="saveRuleBtn">Save Rule</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Settings Tab -->
+            <div class="tab-content" id="tab-settings">
+                <div class="panel">
+                    <div class="panel-header">
+                        <h3>API Configuration</h3>
+                    </div>
+                    <div class="settings-info">
+                        <div class="info-item">
+                            <span class="info-label">API Base URL</span>
+                            <code id="apiBaseUrl">http://localhost:8000</code>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">API Docs</span>
+                            <a href="/docs" target="_blank">/docs (Swagger UI)</a>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">ReDoc</span>
+                            <a href="/redoc" target="_blank">/redoc (ReDoc)</a>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">Health Check</span>
+                            <a href="/health" target="_blank">/health</a>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel mt-2">
+                    <div class="panel-header">
+                        <h3>Webhooks</h3>
+                        <button class="btn btn-sm btn-primary" id="addWebhookBtn">Add Webhook</button>
+                    </div>
+                    <div id="webhooksList" class="webhooks-list"></div>
+                    <div class="add-webhook-form" id="addWebhookForm" style="display:none;">
+                        <div class="form-group">
+                            <input type="text" id="webhookUrl" placeholder="Webhook URL (https://...)">
+                        </div>
+                        <div class="form-group">
+                            <input type="text" id="webhookName" placeholder="Webhook name">
+                        </div>
+                        <div class="form-group">
+                            <input type="text" id="webhookEvents" placeholder="Events (comma-separated): message,connected,*">
+                        </div>
+                        <button class="btn btn-secondary" id="saveWebhookBtn">Register Webhook</button>
+                    </div>
+                </div>
+
+                <div class="panel mt-2">
+                    <div class="panel-header">
+                        <h3>Manus Integration</h3>
+                    </div>
+                    <div class="manus-info">
+                        <p>To integrate with Manus AI, configure an MCP server or use the HTTP API directly.</p>
+                        <div class="code-block">
+                            <pre>
+# Example: Manus reading your chats
+GET /api/v1/messages/chats
+Header: X-API-Key: your_api_key
+
+# Example: Manus searching messages
+POST /api/v1/messages/search
+Body: {"query": "date with Masoud", "contact": "Masoud Nayebi"}
+
+# Example: Manus replying as assistant
+POST /api/v1/assistant/reply-as-assistant
+Body: {"phone": "989...", "message": "Hi, Alireza will contact you soon."}
+                            </pre>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Toast Notifications -->
+        <div class="toast-container" id="toastContainer"></div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

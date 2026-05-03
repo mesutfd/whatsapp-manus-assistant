@@ -1,0 +1,45 @@
+###############################################################################
+# iDeep WhatsApp Bot API - Docker Compose Configuration
+# Run: docker compose up -d
+###############################################################################
+
+version: "3.9"
+
+services:
+  whatsapp-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ideep-whatsapp-bot
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8000}:8000"
+    volumes:
+      # Persist WhatsApp session data and message store
+      - ./data:/app/data
+    env_file:
+      - .env
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8000
+      - WA_DATABASE_PATH=/app/data/whatsapp.db
+      - WA_STORE_PATH=/app/data
+      - MESSAGE_STORE_DB=/app/data/messages.db
+      - LOG_FILE=/app/data/logs/app.log
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - ideep-network
+
+networks:
+  ideep-network:
+    driver: bridge
