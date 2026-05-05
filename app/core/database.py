@@ -83,6 +83,26 @@ def _row_to_dict(row: aiosqlite.Row) -> Dict[str, Any]:
     return {k: row[k] for k in row.keys()}
 
 
+def _normalize_contact_key(contact: str) -> str:
+    """
+    Canonicalize a persona contact key so phone-shaped inputs match what gets
+    extracted from an incoming JID.
+
+    JIDs (containing '@') are kept as-is. Anything else: if it contains at
+    least one digit, strip non-digits — '+1 (555) 123-4567' becomes
+    '15551234567', the form that matches digits extracted from the sender's
+    JID. Non-numeric contacts (e.g. a pushname typed in directly) are
+    returned unchanged.
+    """
+    if not contact:
+        return contact
+    s = contact.strip()
+    if "@" in s:
+        return s
+    digits = "".join(ch for ch in s if ch.isdigit())
+    return digits if digits else s
+
+
 class AppDatabase:
     """Thin async wrapper around aiosqlite for app-level state."""
 
@@ -301,18 +321,28 @@ class AppDatabase:
         if not jid and not pushname:
             return None
         digits = "".join(ch for ch in (jid or "") if ch.isdigit())
+        # Strip common phone-formatting chars from the stored contact so a
+        # row saved as '+1 (555) 123-4567' still matches digits '15551234567'
+        # extracted from the JID. Existing rows that pre-date normalize-on-
+        # write will hit this clause.
+        normalized_sql = (
+            "replace(replace(replace(replace(replace(replace("
+            "contact, '+', ''), ' ', ''), '-', ''), '(', ''), ')', ''), '.', '')"
+        )
         async with self._conn() as db:
             cur = await db.execute(
-                """
+                f"""
                 SELECT * FROM contact_personas
                 WHERE contact = ?
                    OR (? != '' AND contact = ?)
+                   OR (? != '' AND {normalized_sql} = ?)
                    OR (? != '' AND lower(display_name) = lower(?))
                    OR (? != '' AND lower(contact) = lower(?))
                 LIMIT 1
                 """,
                 (
                     jid or "",
+                    digits, digits,
                     digits, digits,
                     pushname or "", pushname or "",
                     pushname or "", pushname or "",
@@ -329,6 +359,7 @@ class AppDatabase:
         system_prompt_override: Optional[str] = None,
         use_llm: bool = True,
     ) -> Dict[str, Any]:
+        contact = _normalize_contact_key(contact)
         async with self._conn() as db:
             await db.execute(
                 """
@@ -346,6 +377,7 @@ class AppDatabase:
         return await self.get_persona(contact) or {}
 
     async def delete_persona(self, contact: str) -> bool:
+        contact = _normalize_contact_key(contact)
         async with self._conn() as db:
             cur = await db.execute("DELETE FROM contact_personas WHERE contact = ?", (contact,))
             await db.commit()
