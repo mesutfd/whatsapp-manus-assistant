@@ -339,12 +339,14 @@ class AppDatabase:
             "replace(replace(replace(replace(replace(replace("
             "contact, '+', ''), ' ', ''), '-', ''), '(', ''), ')', ''), '.', '')"
         )
+        # The normalized comparisons cover digit-only stored contacts too —
+        # `normalized('989358181152') == '989358181152'` — so we don't need
+        # separate exact-contact-vs-digits clauses.
         async with self._conn() as db:
             cur = await db.execute(
                 f"""
                 SELECT * FROM contact_personas
                 WHERE contact = ?
-                   OR (? != '' AND contact = ?)
                    OR (? != '' AND contact = ?)
                    OR (? != '' AND {normalized_sql} = ?)
                    OR (? != '' AND {normalized_sql} = ?)
