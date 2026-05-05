@@ -801,6 +801,7 @@ class WhatsAppClientManager:
         sender_jid: str,
         message_text: str,
         sender_pushname: Optional[str] = None,
+        sender_jid_alt: Optional[str] = None,
     ) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
         """
         Decide whether to auto-reply. Returns (should_reply, reply_text, matched_rule).
@@ -850,9 +851,24 @@ class WhatsAppClientManager:
             break
 
         # Resolve persona — used by the LLM path whether or not a rule matched.
-        persona = await db.find_persona_for_jid(sender_jid, pushname=sender_pushname)
+        # sender_jid_alt is the alternate addressing form: when Sender is
+        # `<opaque>@lid`, SenderAlt is the `<phone>@s.whatsapp.net` form (and
+        # vice versa). Without trying both, LID-addressed messages would never
+        # match a persona stored by phone number.
+        persona = await db.find_persona_for_jid(
+            sender_jid, pushname=sender_pushname, jid_alt=sender_jid_alt,
+        )
         if persona:
-            logger.debug("Persona matched for %s: %s", sender_jid, persona.get("display_name") or persona.get("contact"))
+            logger.debug(
+                "Persona matched for %s (alt=%s): %s",
+                sender_jid, sender_jid_alt or "-",
+                persona.get("display_name") or persona.get("contact"),
+            )
+        else:
+            logger.debug(
+                "No persona matched for sender=%s alt=%s pushname=%s",
+                sender_jid, sender_jid_alt or "-", sender_pushname or "-",
+            )
 
         # ─── Path A: a rule matched ───────────────────────────────────────
         if matched_rule is not None:
@@ -1007,6 +1023,16 @@ class WhatsAppClientManager:
                 text = "[Sticker]"
 
             sender_jid = Jid2String(info.MessageSource.Sender) if info.MessageSource.Sender else "unknown"
+            # SenderAlt is the alternate addressing form (PN <-> LID). Only
+            # populated when WhatsApp ships the message with both, so guard
+            # against it being a default-empty JID (User == "").
+            sender_jid_alt: Optional[str] = None
+            try:
+                alt = getattr(info.MessageSource, "SenderAlt", None)
+                if alt is not None and getattr(alt, "User", ""):
+                    sender_jid_alt = Jid2String(alt)
+            except Exception:
+                sender_jid_alt = None
             chat_jid = Jid2String(info.MessageSource.Chat) if info.MessageSource.Chat else "unknown"
             sender_name = info.Pushname if hasattr(info, 'Pushname') else sender_jid
             is_group = info.MessageSource.IsGroup if hasattr(info.MessageSource, 'IsGroup') else False
@@ -1039,7 +1065,9 @@ class WhatsAppClientManager:
             # Auto-reply logic (don't reply to own messages or group messages)
             if not is_from_me and not is_group and text:
                 should_reply, reply_text, matched_rule = await self._evaluate_auto_reply(
-                    sender_jid, text, sender_pushname=sender_name,
+                    sender_jid, text,
+                    sender_pushname=sender_name,
+                    sender_jid_alt=sender_jid_alt,
                 )
                 if should_reply and reply_text:
                     await asyncio.sleep(2)  # Natural delay

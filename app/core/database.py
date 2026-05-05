@@ -310,17 +310,27 @@ class AppDatabase:
         self,
         jid: str,
         pushname: Optional[str] = None,
+        jid_alt: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Match a persona by, in order of preference:
-            1. Exact JID
-            2. Phone digits extracted from JID (works for @s.whatsapp.net)
+            1. Exact JID (Sender, then SenderAlt if provided)
+            2. Phone digits extracted from JID (works for @s.whatsapp.net) —
+               tried for both Sender and SenderAlt, so a LID-addressed message
+               whose Sender is `<opaque>@lid` still matches via the
+               `<phone>@s.whatsapp.net` form in SenderAlt.
             3. Pushname == display_name (case-insensitive) — needed for @lid JIDs
-               where the digits are an opaque WhatsApp identifier, not the phone.
+               with no SenderAlt and no phone-form persona key.
+            4. Pushname == contact (case-insensitive).
         """
-        if not jid and not pushname:
+        if not jid and not jid_alt and not pushname:
             return None
-        digits = "".join(ch for ch in (jid or "") if ch.isdigit())
+
+        def _digits(s: Optional[str]) -> str:
+            return "".join(ch for ch in (s or "") if ch.isdigit())
+
+        digits = _digits(jid)
+        digits_alt = _digits(jid_alt)
         # Strip common phone-formatting chars from the stored contact so a
         # row saved as '+1 (555) 123-4567' still matches digits '15551234567'
         # extracted from the JID. Existing rows that pre-date normalize-on-
@@ -335,6 +345,8 @@ class AppDatabase:
                 SELECT * FROM contact_personas
                 WHERE contact = ?
                    OR (? != '' AND contact = ?)
+                   OR (? != '' AND contact = ?)
+                   OR (? != '' AND {normalized_sql} = ?)
                    OR (? != '' AND {normalized_sql} = ?)
                    OR (? != '' AND lower(display_name) = lower(?))
                    OR (? != '' AND lower(contact) = lower(?))
@@ -342,8 +354,9 @@ class AppDatabase:
                 """,
                 (
                     jid or "",
+                    jid_alt or "", jid_alt or "",
                     digits, digits,
-                    digits, digits,
+                    digits_alt, digits_alt,
                     pushname or "", pushname or "",
                     pushname or "", pushname or "",
                 ),
