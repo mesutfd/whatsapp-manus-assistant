@@ -21,6 +21,7 @@ from fastapi.templating import Jinja2Templates
 from app.api.assistant import router as assistant_router
 from app.api.connection import router as connection_router
 from app.api.contacts import router as contacts_router
+from app.api.instructions import router as instructions_router
 from app.api.messages import router as messages_router
 from app.api.schedule import router as schedule_router
 from app.api.webhooks import router as webhooks_router
@@ -168,6 +169,7 @@ app.include_router(assistant_router)
 app.include_router(schedule_router)
 app.include_router(webhooks_router)
 app.include_router(smart_router)
+app.include_router(instructions_router)
 
 # ─── Static Files & Templates ────────────────────────────────────────────────
 
@@ -218,6 +220,7 @@ async def api_info():
         "docs_url": "/docs",
         "redoc_url": "/redoc",
         "endpoints": {
+            "instructions": "/api/v1/instructions (START HERE - bootstrap prompt for AI agents)",
             "smart": "/api/v1/smart (RECOMMENDED - Manus primary interface)",
             "connection": "/api/v1/connection",
             "messages": "/api/v1/messages",
