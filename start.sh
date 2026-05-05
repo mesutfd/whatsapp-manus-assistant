@@ -49,9 +49,53 @@ fi
 # Create data directory
 mkdir -p data/logs
 
+# Ensure libmagic is installed (required by python-magic, a neonize dependency)
+ensure_libmagic() {
+    # Quick presence check across the common locations
+    if ldconfig -p 2>/dev/null | grep -q "libmagic\.so" \
+        || [ -f /usr/lib/libmagic.dylib ] \
+        || [ -f /opt/homebrew/lib/libmagic.dylib ] \
+        || [ -f /usr/local/lib/libmagic.dylib ]; then
+        return 0
+    fi
+
+    echo -e "${YELLOW}libmagic not found. Attempting to install...${NC}"
+
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        if command -v brew &> /dev/null; then
+            brew install libmagic
+        else
+            echo -e "${RED}Homebrew not found. Install libmagic manually: brew install libmagic${NC}"
+            exit 1
+        fi
+    elif command -v apt-get &> /dev/null; then
+        SUDO=""
+        [ "$(id -u)" -ne 0 ] && SUDO="sudo"
+        $SUDO apt-get update -y && $SUDO apt-get install -y libmagic1
+    elif command -v dnf &> /dev/null; then
+        SUDO=""
+        [ "$(id -u)" -ne 0 ] && SUDO="sudo"
+        $SUDO dnf install -y file-libs
+    elif command -v yum &> /dev/null; then
+        SUDO=""
+        [ "$(id -u)" -ne 0 ] && SUDO="sudo"
+        $SUDO yum install -y file-libs
+    elif command -v apk &> /dev/null; then
+        SUDO=""
+        [ "$(id -u)" -ne 0 ] && SUDO="sudo"
+        $SUDO apk add --no-cache libmagic
+    else
+        echo -e "${RED}Could not detect package manager. Install libmagic manually.${NC}"
+        exit 1
+    fi
+}
+
 if [ "$MODE" = "dev" ]; then
     echo -e "${BLUE}Starting in development mode (hot-reload)...${NC}"
     echo ""
+
+    # System libs required at runtime by Python deps
+    ensure_libmagic
 
     # Detect Python command
     if command -v python3 &> /dev/null; then

@@ -6,9 +6,11 @@
 FROM python:3.11-slim AS base
 
 # System dependencies
+# libmagic1 is required by python-magic (used by neonize for media type detection)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libffi-dev \
+    libmagic1 \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
