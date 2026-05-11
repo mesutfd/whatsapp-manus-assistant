@@ -89,6 +89,11 @@ class IDeepApp {
         this.loadPersonas();
         this.loadScheduled();
         this.loadWebhooks();
+        this.loadPermissions();
+        this.updateApiBaseUrl();
+    }
+
+    updateApiBaseUrl() {
         document.getElementById('apiBaseUrl').textContent = this.baseUrl;
     }
 
@@ -612,6 +617,172 @@ class IDeepApp {
         }
     }
 
+    // ─── Permissions / Allowed Contacts ─────────────────────────────────
+
+    async loadPermissions() {
+        try {
+            const data = await this.api('GET', '/api/v1/permissions/');
+            document.getElementById('permissionsEnabled').checked = !!data.enabled;
+            this.renderAllowedContacts(data.contacts || []);
+            this.updatePermissionsStatus(data);
+        } catch (e) {
+            // Silently handle
+        }
+    }
+
+    updatePermissionsStatus(data) {
+        const el = document.getElementById('permissionsStatus');
+        if (!el) return;
+        const total = (data.contacts || []).length;
+        const active = (data.contacts || []).filter(c => c.enabled !== false).length;
+        el.textContent = data.enabled
+            ? `Enforcing: ${active} active / ${total} allow-listed contacts. Sends to anyone else will be blocked.`
+            : `Not enforcing. ${total} allow-listed contacts saved but sends are unrestricted.`;
+    }
+
+    async togglePermissions(enabled) {
+        try {
+            const data = await this.api('PUT', '/api/v1/permissions/toggle', { enabled });
+            this.toast(enabled ? 'Allow-list enforcement enabled' : 'Allow-list enforcement disabled', 'success');
+            this.updatePermissionsStatus(data);
+        } catch (e) {
+            this.toast(`Toggle failed: ${e.message}`, 'error');
+            document.getElementById('permissionsEnabled').checked = !enabled;
+        }
+    }
+
+    renderAllowedContacts(contacts) {
+        const container = document.getElementById('allowedContactsList');
+        if (!contacts || contacts.length === 0) {
+            container.innerHTML = '<p style="color:var(--text-muted);font-size:13px;">No allowed contacts yet. Add one to let the assistant message them.</p>';
+            return;
+        }
+
+        container.innerHTML = contacts.map(c => {
+            const aliases = (c.llm_friendly_names || []).join(', ');
+            const tags = (c.tags || []).map(t => `<span class="chip">${this.escapeHtml(t)}</span>`).join('');
+            const disabledBadge = c.enabled === false ? '<span class="chip chip-warn">disabled</span>' : '';
+            return `
+                <div class="rule-item allowed-contact-item">
+                    <div class="rule-info">
+                        <strong>${this.escapeHtml(c.name || c.phone)} ${disabledBadge}</strong>
+                        <span><b>Phone:</b> ${this.escapeHtml(c.phone)}${c.relation ? ` · <b>Relation:</b> ${this.escapeHtml(c.relation)}` : ''}</span>
+                        ${aliases ? `<span><b>Aliases:</b> ${this.escapeHtml(aliases)}</span>` : ''}
+                        ${tags ? `<span class="chip-row">${tags}</span>` : ''}
+                        ${c.notes ? `<span><b>Notes:</b> ${this.escapeHtml(c.notes)}</span>` : ''}
+                    </div>
+                    <div class="rule-actions">
+                        <button class="btn btn-sm btn-outline" onclick="app.editAllowedContact('${c.id}')">Edit</button>
+                        <button class="btn btn-sm btn-danger" onclick="app.deleteAllowedContact('${c.id}')">Remove</button>
+                    </div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    showAllowedContactForm(contact = null) {
+        const form = document.getElementById('addAllowedContactForm');
+        document.getElementById('allowedContactFormTitle').textContent = contact ? 'Edit Allowed Contact' : 'New Allowed Contact';
+        document.getElementById('allowedContactId').value = contact?.id || '';
+        document.getElementById('allowedName').value = contact?.name || '';
+        document.getElementById('allowedPhone').value = contact?.phone || '';
+        document.getElementById('allowedRelation').value = contact?.relation || '';
+        document.getElementById('allowedTags').value = (contact?.tags || []).join(', ');
+        document.getElementById('allowedAliases').value = (contact?.llm_friendly_names || []).join(', ');
+        document.getElementById('allowedNotes').value = contact?.notes || '';
+        document.getElementById('allowedAttributes').value = contact?.attributes && Object.keys(contact.attributes).length
+            ? JSON.stringify(contact.attributes, null, 2)
+            : '';
+        document.getElementById('allowedEnabled').checked = contact ? contact.enabled !== false : true;
+        form.style.display = 'block';
+    }
+
+    hideAllowedContactForm() {
+        document.getElementById('addAllowedContactForm').style.display = 'none';
+    }
+
+    async editAllowedContact(id) {
+        try {
+            const c = await this.api('GET', `/api/v1/permissions/contacts/${id}`);
+            this.showAllowedContactForm(c);
+        } catch (e) {
+            this.toast(`Load failed: ${e.message}`, 'error');
+        }
+    }
+
+    async deleteAllowedContact(id) {
+        if (!confirm('Remove this contact from the allow-list?')) return;
+        try {
+            await this.api('DELETE', `/api/v1/permissions/contacts/${id}`);
+            this.toast('Contact removed', 'success');
+            this.loadPermissions();
+        } catch (e) {
+            this.toast(`Delete failed: ${e.message}`, 'error');
+        }
+    }
+
+    _parseCsv(value) {
+        return (value || '')
+            .split(',')
+            .map(s => s.trim())
+            .filter(Boolean);
+    }
+
+    async saveAllowedContact() {
+        const id = document.getElementById('allowedContactId').value;
+        const name = document.getElementById('allowedName').value.trim();
+        const phone = document.getElementById('allowedPhone').value.trim();
+        const relation = document.getElementById('allowedRelation').value.trim();
+        const tags = this._parseCsv(document.getElementById('allowedTags').value);
+        const llm_friendly_names = this._parseCsv(document.getElementById('allowedAliases').value);
+        const notes = document.getElementById('allowedNotes').value.trim();
+        const enabled = document.getElementById('allowedEnabled').checked;
+        const attrRaw = document.getElementById('allowedAttributes').value.trim();
+
+        if (!name || !phone) {
+            this.toast('Name and phone are required', 'error');
+            return;
+        }
+
+        let attributes = {};
+        if (attrRaw) {
+            try {
+                attributes = JSON.parse(attrRaw);
+                if (typeof attributes !== 'object' || Array.isArray(attributes)) {
+                    throw new Error('must be a JSON object');
+                }
+            } catch (e) {
+                this.toast(`Attributes JSON invalid: ${e.message}`, 'error');
+                return;
+            }
+        }
+
+        const payload = {
+            name,
+            phone,
+            relation: relation || null,
+            tags,
+            llm_friendly_names,
+            notes: notes || null,
+            attributes,
+            enabled,
+        };
+
+        try {
+            if (id) {
+                await this.api('PUT', `/api/v1/permissions/contacts/${id}`, payload);
+                this.toast('Contact updated', 'success');
+            } else {
+                await this.api('POST', '/api/v1/permissions/contacts', payload);
+                this.toast('Contact added', 'success');
+            }
+            this.hideAllowedContactForm();
+            this.loadPermissions();
+        } catch (e) {
+            this.toast(`Save failed: ${e.message}`, 'error');
+        }
+    }
+
     // ─── Webhooks ───────────────────────────────────────────────────────
 
     async loadWebhooks() {
@@ -725,6 +896,18 @@ class IDeepApp {
             f.style.display = f.style.display === 'none' ? 'block' : 'none';
         });
         document.getElementById('saveWebhookBtn').addEventListener('click', () => this.addWebhook());
+
+        // Permissions / allow-list
+        const permToggle = document.getElementById('permissionsEnabled');
+        if (permToggle) {
+            permToggle.addEventListener('change', (e) => this.togglePermissions(e.target.checked));
+        }
+        const addAllowedBtn = document.getElementById('addAllowedContactBtn');
+        if (addAllowedBtn) addAllowedBtn.addEventListener('click', () => this.showAllowedContactForm());
+        const saveAllowedBtn = document.getElementById('saveAllowedContactBtn');
+        if (saveAllowedBtn) saveAllowedBtn.addEventListener('click', () => this.saveAllowedContact());
+        const cancelAllowedBtn = document.getElementById('cancelAllowedContactBtn');
+        if (cancelAllowedBtn) cancelAllowedBtn.addEventListener('click', () => this.hideAllowedContactForm());
     }
 
     // ─── Utilities ──────────────────────────────────────────────────────

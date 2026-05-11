@@ -691,13 +691,23 @@ async def get_instructions_runtime(user: dict = Depends(get_current_user)):
 
     Auth required — this leaks operator configuration.
     """
+    from app.services.allowed_contacts import allowed_contacts_service
+
     status = wa_client.get_status()
     auto_reply_cfg = await wa_client.get_auto_reply_config()
     llm_info = llm_client.info()
     webhooks = webhook_service.list_webhooks()
     scheduled = await db.list_scheduled(status="pending", limit=10)
+    permissions_state = await allowed_contacts_service.get_state()
 
     advice = _runtime_advice(status, auto_reply_cfg, llm_info, webhooks)
+
+    if permissions_state["enabled"]:
+        advice.append(
+            "Send allow-list is ENFORCED. Only contacts in `permissions.allowed_contacts` "
+            "with `enabled: true` will accept sends. Match user requests against `name`, "
+            "`relation`, `llm_friendly_names`, `tags`, and `attributes`."
+        )
 
     return {
         "version": settings.APP_VERSION,
@@ -730,6 +740,32 @@ async def get_instructions_runtime(user: dict = Depends(get_current_user)):
         "scheduled_pending": {
             "count": len(scheduled),
             "next": scheduled[0] if scheduled else None,
+        },
+        "permissions": {
+            "enforced": permissions_state["enabled"],
+            "description": (
+                "When enforced, outbound sends are restricted to allowed_contacts "
+                "with enabled=true. Resolve user requests against name, relation, "
+                "llm_friendly_names, tags, and attributes."
+            ),
+            "total_contacts": len(permissions_state["contacts"]),
+            "active_contacts": sum(
+                1 for c in permissions_state["contacts"] if c.get("enabled", True)
+            ),
+            "allowed_contacts": [
+                {
+                    "id": c["id"],
+                    "name": c["name"],
+                    "phone": c["phone"],
+                    "relation": c.get("relation"),
+                    "llm_friendly_names": c.get("llm_friendly_names", []),
+                    "tags": c.get("tags", []),
+                    "notes": c.get("notes"),
+                    "attributes": c.get("attributes", {}),
+                    "enabled": c.get("enabled", True),
+                }
+                for c in permissions_state["contacts"]
+            ],
         },
         "endpoints": _endpoint_index(),
     }

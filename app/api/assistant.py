@@ -23,6 +23,7 @@ from app.models.schemas import (
     SendMessageRequest,
     SendMessageResponse,
 )
+from app.services.allowed_contacts import allowed_contacts_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/assistant", tags=["iDeep AI Assistant"])
@@ -91,6 +92,19 @@ async def send_assistant_reply(
     """Send a message prefixed with the assistant name."""
     if not wa_client.is_connected:
         raise HTTPException(status_code=503, detail="WhatsApp is not connected")
+
+    permission = await allowed_contacts_service.check_allowed(request.phone)
+    if not permission["allowed"]:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "recipient_not_allowed",
+                "phone": permission["phone"],
+                "reason": permission["reason"],
+                "hint": "Add this contact to the allow-list in the Permissions tab.",
+            },
+        )
+
     assistant_msg = f"*{settings.ASSISTANT_NAME}*\n\n{request.message}"
     result = await wa_client.send_message(request.phone, assistant_msg)
     return SendMessageResponse(**result)
@@ -106,6 +120,19 @@ async def reply_as_assistant(
     """Contextual reply used by Manus."""
     if not wa_client.is_connected:
         raise HTTPException(status_code=503, detail="WhatsApp is not connected")
+
+    permission = await allowed_contacts_service.check_allowed(phone)
+    if not permission["allowed"]:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "recipient_not_allowed",
+                "phone": permission["phone"],
+                "reason": permission["reason"],
+                "hint": "Add this contact to the allow-list in the Permissions tab.",
+            },
+        )
+
     full_message = f"*{settings.ASSISTANT_NAME}*\n\n{message}"
     result = await wa_client.send_message(phone, full_message)
     return {

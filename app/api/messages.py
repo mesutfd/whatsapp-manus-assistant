@@ -20,6 +20,7 @@ from app.models.schemas import (
     SendMessageRequest,
     SendMessageResponse,
 )
+from app.services.allowed_contacts import allowed_contacts_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/messages", tags=["Messages"])
@@ -33,6 +34,18 @@ async def send_message(request: SendMessageRequest, user: dict = Depends(get_cur
     """
     if not wa_client.is_connected:
         raise HTTPException(status_code=503, detail="WhatsApp is not connected")
+
+    permission = await allowed_contacts_service.check_allowed(request.phone)
+    if not permission["allowed"]:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "recipient_not_allowed",
+                "phone": permission["phone"],
+                "reason": permission["reason"],
+                "hint": "Add this contact to the allow-list (Permissions tab) or turn off enforcement.",
+            },
+        )
 
     result = await wa_client.send_message(request.phone, request.message)
     return SendMessageResponse(**result)
@@ -51,6 +64,17 @@ async def send_bulk_messages(request: BulkMessageRequest, user: dict = Depends(g
     failed = 0
 
     for phone in request.phones:
+        permission = await allowed_contacts_service.check_allowed(phone)
+        if not permission["allowed"]:
+            results.append(SendMessageResponse(
+                success=False,
+                to=phone,
+                message=request.message,
+                error=f"recipient_not_allowed: {permission['reason']}",
+            ))
+            failed += 1
+            continue
+
         result = await wa_client.send_message(phone, request.message)
         response = SendMessageResponse(**result)
         results.append(response)

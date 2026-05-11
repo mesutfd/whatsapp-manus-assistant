@@ -104,10 +104,16 @@ class SendMessageRequest(BaseModel):
 
 
 class SendMessageResponse(BaseModel):
-    """Response after sending a message."""
+    """Response after sending a message.
+
+    `message` is Optional because failure paths in `wa_client.send_message`
+    (session-stale, invalid phone, not on WhatsApp, etc.) return a dict
+    without the message body — only success/error/to. Treating it as required
+    masked the real error behind a 500 ValidationError.
+    """
     success: bool
     to: str
-    message: str
+    message: Optional[str] = None
     timestamp: Optional[str] = None
     message_id: Optional[str] = None
     error: Optional[str] = None
@@ -340,3 +346,92 @@ class APIInfoResponse(BaseModel):
     description: str
     docs_url: str
     endpoints: Dict[str, str]
+
+
+# ─── Allowed Contacts (Send Permissions) ─────────────────────────────────────
+
+
+class AllowedContactBase(BaseModel):
+    """Shared fields for an allow-listed contact the assistant may message."""
+    name: str = Field(..., description="Canonical name shown in the panel")
+    phone: str = Field(..., description="Phone number with country code, no '+'")
+    relation: Optional[str] = Field(
+        None,
+        description="Relationship to the user (e.g. 'daughter', 'CTO at iDeep')",
+    )
+    llm_friendly_names: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Aliases the LLM should recognize for this contact. "
+            "Examples: ['masoud', 'مسعود', 'ideep company CTO']"
+        ),
+    )
+    tags: List[str] = Field(
+        default_factory=list,
+        description="Free-form tags (e.g. ['family', 'work', 'urgent-ok'])",
+    )
+    notes: Optional[str] = Field(
+        None,
+        description="Free-form notes for the LLM (tone, language, do/don't, etc.)",
+    )
+    attributes: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Extra structured attributes (role, company, language, ...)",
+    )
+    enabled: bool = Field(
+        True,
+        description="If false, this contact is in the list but currently blocked",
+    )
+
+
+class AllowedContactCreate(AllowedContactBase):
+    """Payload to create a new allowed contact."""
+    pass
+
+
+class AllowedContactUpdate(BaseModel):
+    """Partial update payload — all fields optional."""
+    name: Optional[str] = None
+    phone: Optional[str] = None
+    relation: Optional[str] = None
+    llm_friendly_names: Optional[List[str]] = None
+    tags: Optional[List[str]] = None
+    notes: Optional[str] = None
+    attributes: Optional[Dict[str, Any]] = None
+    enabled: Optional[bool] = None
+
+
+class AllowedContact(AllowedContactBase):
+    """A stored allowed contact (includes server-managed fields)."""
+    id: str
+    created_at: str
+    updated_at: str
+
+
+class PermissionsConfig(BaseModel):
+    """Global toggle + the full allow-list."""
+    enabled: bool = Field(
+        ...,
+        description=(
+            "Master switch. When true, sends are restricted to allow-listed "
+            "contacts. When false, all sends pass through (no restriction)."
+        ),
+    )
+    contacts: List[AllowedContact] = Field(default_factory=list)
+
+
+class PermissionsToggle(BaseModel):
+    """Body for toggling the master switch."""
+    enabled: bool
+
+
+class PermissionsCheckResponse(BaseModel):
+    """Result of an allow-list check for a phone number."""
+    phone: str
+    allowed: bool
+    enforced: bool = Field(
+        ...,
+        description="Whether the master switch is on (i.e. checks are enforced)",
+    )
+    contact: Optional[AllowedContact] = None
+    reason: Optional[str] = None

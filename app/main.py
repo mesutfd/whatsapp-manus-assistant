@@ -23,6 +23,7 @@ from app.api.connection import router as connection_router
 from app.api.contacts import router as contacts_router
 from app.api.instructions import router as instructions_router
 from app.api.messages import router as messages_router
+from app.api.permissions import router as permissions_router
 from app.api.schedule import router as schedule_router
 from app.api.webhooks import router as webhooks_router
 from app.api.smart import router as smart_router
@@ -170,6 +171,7 @@ app.include_router(schedule_router)
 app.include_router(webhooks_router)
 app.include_router(smart_router)
 app.include_router(instructions_router)
+app.include_router(permissions_router)
 
 # ─── Static Files & Templates ────────────────────────────────────────────────
 
@@ -226,6 +228,7 @@ async def api_info():
             "messages": "/api/v1/messages",
             "contacts": "/api/v1/contacts",
             "assistant": "/api/v1/assistant",
+            "permissions": "/api/v1/permissions (allow-list for assistant sends)",
             "schedule": "/api/v1/schedule",
             "webhooks": "/api/v1/webhooks",
             "health": "/health",

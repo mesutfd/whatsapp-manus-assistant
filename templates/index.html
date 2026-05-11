@@ -58,6 +58,7 @@
                 <button class="tab-btn active" data-tab="connection">Connection</button>
                 <button class="tab-btn" data-tab="messages">Messages</button>
                 <button class="tab-btn" data-tab="assistant">Assistant</button>
+                <button class="tab-btn" data-tab="permissions">Permissions</button>
                 <button class="tab-btn" data-tab="schedule">Schedule</button>
                 <button class="tab-btn" data-tab="settings">Settings</button>
             </nav>
@@ -385,6 +386,89 @@
                 <div class="panel mt-2">
                     <div class="panel-header"><h3>History</h3></div>
                     <div id="scheduledHistoryList" class="list-block"></div>
+                </div>
+            </div>
+
+            <!-- ─── Permissions Tab ────────────────────────────────────── -->
+            <div class="tab-content" id="tab-permissions">
+                <div class="panel">
+                    <div class="panel-header">
+                        <h3>Allowed Contacts</h3>
+                        <button class="btn btn-sm btn-primary" id="addAllowedContactBtn">Add Contact</button>
+                    </div>
+                    <p style="color:var(--text-secondary);font-size:13px;margin-bottom:14px;">
+                        Curate the contacts the assistant (Manus / LLM) may send WhatsApp messages to.
+                        Turn the master switch off to allow sending to anyone.
+                    </p>
+                    <div class="form-group toggle-group">
+                        <label>Enforce Allow-List</label>
+                        <label class="toggle">
+                            <input type="checkbox" id="permissionsEnabled">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div id="permissionsStatus" style="font-size:13px;color:var(--text-muted);margin-bottom:14px;"></div>
+
+                    <div id="allowedContactsList" class="rules-list"></div>
+
+                    <div class="add-rule-form" id="addAllowedContactForm" style="display:none;">
+                        <h4 id="allowedContactFormTitle" style="margin-bottom:12px;">New Allowed Contact</h4>
+                        <input type="hidden" id="allowedContactId" value="">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Name</label>
+                                <input type="text" id="allowedName" placeholder="e.g. Masoud">
+                            </div>
+                            <div class="form-group">
+                                <label>Phone (with country code, no +)</label>
+                                <input type="text" id="allowedPhone" placeholder="989121234567">
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Relation</label>
+                                <input type="text" id="allowedRelation" placeholder="e.g. daughter, CTO at iDeep">
+                            </div>
+                            <div class="form-group">
+                                <label>Tags (comma-separated)</label>
+                                <input type="text" id="allowedTags" placeholder="family, work, urgent-ok">
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>LLM-friendly Names (comma-separated)</label>
+                            <input type="text" id="allowedAliases" placeholder="masoud, مسعود, ideep company CTO">
+                        </div>
+                        <div class="form-group">
+                            <label>Notes for the LLM</label>
+                            <textarea id="allowedNotes" rows="2" placeholder="Tone, language, do/don't..."></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label>Attributes (JSON, optional)</label>
+                            <textarea id="allowedAttributes" rows="2" placeholder='{"role": "CTO", "company": "iDeep", "language": "fa"}'></textarea>
+                        </div>
+                        <div class="form-group toggle-group">
+                            <label>Enabled</label>
+                            <label class="toggle">
+                                <input type="checkbox" id="allowedEnabled" checked>
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                        <div class="form-row">
+                            <button class="btn btn-secondary" id="saveAllowedContactBtn">Save Contact</button>
+                            <button class="btn btn-outline" id="cancelAllowedContactBtn">Cancel</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel mt-2">
+                    <div class="panel-header"><h3>LLM Instructions Endpoint</h3></div>
+                    <p style="color:var(--text-secondary);font-size:13px;margin-bottom:12px;">
+                        Point Manus / your agent at one of these endpoints at session start so it
+                        knows the send policy and the curated contacts.
+                    </p>
+                    <div class="code-block">
+                        <code>GET /api/v1/instructions             # full bootstrap (includes allow-list)<br>GET /api/v1/permissions/instructions # allow-list policy only<br>Header: X-API-Key: YOUR_KEY</code>
+                    </div>
                 </div>
             </div>
 

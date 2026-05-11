@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from app.core.auth import get_current_user
 from app.core.config import settings
 from app.core.whatsapp_client import wa_client
+from app.services.allowed_contacts import allowed_contacts_service
 from app.utils.contact_resolver import resolve_contact, resolve_single_contact
 
 logger = logging.getLogger(__name__)
@@ -77,7 +78,7 @@ async def smart_send_message(request: SmartSendRequest, user: dict = Depends(get
     if not wa_client.is_connected:
         raise HTTPException(status_code=503, detail="WhatsApp is not connected")
 
-    # Step 1: Resolve the contact
+    # Step 1: Resolve the contact (allow-list first, then WhatsApp contacts)
     resolved = await _resolve_recipient(request.to)
 
     if not resolved:
@@ -95,7 +96,27 @@ async def smart_send_message(request: SmartSendRequest, user: dict = Depends(get
     if request.as_assistant:
         message = f"*{settings.ASSISTANT_NAME}*\n\n{message}"
 
-    # Step 3: Send
+    # Step 3: Enforce the allow-list before sending
+    permission = await allowed_contacts_service.check_allowed(phone)
+    if not permission["allowed"]:
+        return {
+            "success": False,
+            "error": "recipient_not_allowed",
+            "resolved_contact": {
+                "name": resolved.get("name"),
+                "phone": resolved.get("phone"),
+                "jid": resolved.get("jid"),
+                "match_score": resolved.get("match_score"),
+            },
+            "reason": permission["reason"],
+            "message": (
+                f"Cannot send to '{resolved.get('name') or phone}': "
+                f"{permission['reason']}. Ask the user to add this contact "
+                "to the allow-list in the Permissions tab, or disable enforcement."
+            ),
+        }
+
+    # Step 4: Send
     result = await wa_client.send_message(phone, message)
 
     return {
@@ -232,6 +253,14 @@ async def _resolve_recipient(identifier: str) -> Optional[dict]:
     """
     Resolve a recipient identifier to a usable contact dict with phone number.
     Handles both phone numbers and fuzzy name matching.
+
+    Resolution order:
+      1. Phone numbers — used as-is.
+      2. Allow-listed contacts (name / relation / tags / llm_friendly_names).
+         Hitting here gives the LLM direct semantic access without needing a
+         live WhatsApp contact-list lookup.
+      3. WhatsApp contact list (fuzzy).
+      4. Recently-seen senders from the message store.
     """
     import re
 
@@ -245,6 +274,14 @@ async def _resolve_recipient(identifier: str) -> Optional[dict]:
             "jid": f"{digits_only}@s.whatsapp.net",
             "match_score": 1.0,
         }
+
+    # Try allow-list aliases first — these are the curated names the user
+    # taught the assistant ("Mom", "masoud", "مسعود", "ideep CTO", ...).
+    allow_match = _match_allow_list(
+        identifier, await allowed_contacts_service.list_contacts()
+    )
+    if allow_match:
+        return allow_match
 
     # It's a name - do fuzzy resolution
     contacts = await wa_client.get_contacts()
@@ -274,3 +311,52 @@ async def _resolve_recipient(identifier: str) -> Optional[dict]:
             }
 
     return None
+
+
+def _match_allow_list(identifier: str, entries: list) -> Optional[dict]:
+    """Match a query against the allow-list's curated aliases/tags/relation."""
+    if not identifier or not entries:
+        return None
+
+    q = identifier.strip().lower()
+    if not q:
+        return None
+
+    def haystack(entry: dict) -> list[str]:
+        parts = [
+            entry.get("name") or "",
+            entry.get("relation") or "",
+            entry.get("notes") or "",
+        ]
+        parts.extend(entry.get("llm_friendly_names") or [])
+        parts.extend(entry.get("tags") or [])
+        for v in (entry.get("attributes") or {}).values():
+            if isinstance(v, str):
+                parts.append(v)
+        return [p.lower() for p in parts if p]
+
+    # Exact alias match (highest confidence)
+    for entry in entries:
+        for needle in haystack(entry):
+            if needle == q:
+                return _as_resolved(entry, score=1.0)
+
+    # Substring containment in either direction
+    for entry in entries:
+        for needle in haystack(entry):
+            if q in needle or needle in q:
+                return _as_resolved(entry, score=0.85)
+
+    return None
+
+
+def _as_resolved(entry: dict, score: float) -> dict:
+    phone = entry.get("phone") or ""
+    return {
+        "name": entry.get("name") or phone,
+        "phone": phone,
+        "jid": f"{phone}@s.whatsapp.net" if phone else None,
+        "match_score": score,
+        "from_allow_list": True,
+        "allow_list_id": entry.get("id"),
+    }
