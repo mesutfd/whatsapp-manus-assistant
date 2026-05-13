@@ -27,6 +27,33 @@ def _normalize_phone(phone: str) -> str:
     return re.sub(r"\D", "", phone)
 
 
+# Minimum digit overlap before we accept a suffix match. National subscriber
+# numbers are virtually always >= 8 digits, so this is conservative enough to
+# avoid colliding two distinct contacts while still letting a stored
+# "9358181152" match an incoming "989358181152" (and vice versa).
+_PHONE_SUFFIX_MIN = 8
+
+
+def _phones_match(stored: str, target: str) -> bool:
+    """
+    Compare two normalized phone numbers tolerantly.
+
+    Exact-equal wins; otherwise we accept a match when the shorter number is a
+    suffix of the longer one and overlaps by at least `_PHONE_SUFFIX_MIN`
+    digits. This covers the common case where the allow-list stores a local
+    number ("9358181152") and the API receives one with the country code
+    prefixed ("989358181152"), or vice versa.
+    """
+    if not stored or not target:
+        return False
+    if stored == target:
+        return True
+    short, long_ = (stored, target) if len(stored) <= len(target) else (target, stored)
+    if len(short) < _PHONE_SUFFIX_MIN:
+        return False
+    return long_.endswith(short)
+
+
 def _now_iso() -> str:
     return datetime.utcnow().isoformat()
 
@@ -121,8 +148,8 @@ class AllowedContactsService:
             if not phone:
                 raise ValueError("phone is required and must contain digits")
 
-            # Deduplicate by normalized phone
-            if any(c.get("phone") == phone for c in self._contacts):
+            # Deduplicate by normalized phone (tolerant of country-code differences)
+            if any(_phones_match(c.get("phone", ""), phone) for c in self._contacts):
                 raise ValueError(f"A contact with phone {phone} is already on the allow-list")
 
             now = _now_iso()
@@ -169,7 +196,7 @@ class AllowedContactsService:
                 if not new_phone:
                     raise ValueError("phone must contain digits")
                 if any(
-                    c.get("phone") == new_phone and c["id"] != contact_id
+                    c["id"] != contact_id and _phones_match(c.get("phone", ""), new_phone)
                     for c in self._contacts
                 ):
                     raise ValueError(
@@ -200,7 +227,10 @@ class AllowedContactsService:
             return None
         async with self._lock:
             await self._ensure_loaded()
-            return next((c for c in self._contacts if c["phone"] == target), None)
+            return next(
+                (c for c in self._contacts if _phones_match(c.get("phone", ""), target)),
+                None,
+            )
 
     async def check_allowed(self, phone: str) -> Dict[str, Any]:
         """
@@ -215,7 +245,14 @@ class AllowedContactsService:
             enforced = self._enabled
             target = _normalize_phone(phone)
             contact = (
-                next((c for c in self._contacts if c["phone"] == target), None)
+                next(
+                    (
+                        c
+                        for c in self._contacts
+                        if _phones_match(c.get("phone", ""), target)
+                    ),
+                    None,
+                )
                 if target
                 else None
             )
