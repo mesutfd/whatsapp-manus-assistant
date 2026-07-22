@@ -138,6 +138,7 @@ class MessageRecord(BaseModel):
     """A stored message record."""
     id: str
     from_jid: Optional[str] = Field(None, alias="from")
+    from_phone: Optional[str] = None
     chat_jid: Optional[str] = None
     sender_name: Optional[str] = None
     text: Optional[str] = None

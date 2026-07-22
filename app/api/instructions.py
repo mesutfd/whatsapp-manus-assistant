@@ -275,6 +275,29 @@ Group messages are present in the store but tagged `is_group: true`. The
 auto-reply system never replies to groups by design — you shouldn't either,
 unless explicitly asked.
 
+### 5.1 Backfilling history from before this server was linked
+
+whatsmeow only ever sees traffic sent/received while connected — there is
+no protocol-level way to pull years of prior conversation for an
+already-linked device. If the user wants deep history for a specific
+contact (e.g. "read my last 500 messages with X and analyze it") and the
+live store doesn't go back far enough, the fix is a one-time manual import:
+
+  1. Tell the user to export that 1:1 chat from their phone: WhatsApp →
+     open the chat → ⋮ (or contact name) → More → Export chat → **Without
+     Media**. This produces a `.txt` transcript.
+  2. `POST /api/v1/messages/import-history` (multipart form) with:
+       - `file`: the exported `.txt`
+       - `phone`: that contact's phone number, digits only
+       - `other_name`: exactly how their name appears in the export file
+  3. The response reports `parsed_messages` / `newly_inserted`. Imported
+     messages are merged into the same persisted store as live traffic —
+     re-running with the same file is safe (duplicates are ignored).
+
+After import, `GET /api/v1/messages/chat/{phone}?limit=500` (not
+`/smart/recent`, which is capped and unfiltered) is the right call for a
+"read the last N messages with this contact" request.
+
 ---
 
 ## 6. Webhooks (push, the right default for real-time)
@@ -558,6 +581,8 @@ STRUCTURED_SECTIONS: List[Dict[str, Any]] = [
         "details": [
             "Group messages are tagged is_group: true; auto-reply skips them.",
             "Don't fabricate history beyond the store window.",
+            "For deep per-contact history not in the live store, POST /api/v1/messages/import-history "
+            "with a WhatsApp 'Export chat' .txt (one-time manual backfill, safe to re-run/idempotent).",
         ],
     },
     {
@@ -848,6 +873,7 @@ def _endpoint_index() -> Dict[str, Dict[str, str]]:
             "search": "POST /api/v1/messages/search",
             "history": "GET /api/v1/messages/history",
             "unread": "GET /api/v1/messages/unread",
+            "import_history": "POST /api/v1/messages/import-history",
         },
         "contacts": {
             "list": "GET /api/v1/contacts/",

@@ -2,22 +2,21 @@
 Allowed-contacts service.
 
 Stores the list of contacts the assistant (Manus/LLM) is permitted to send
-WhatsApp messages to. Backed by a JSON file under WA_STORE_PATH so the data
-survives restarts without needing a schema migration.
+WhatsApp messages to, plus the master enforcement toggle. Backed by MongoDB
+(collections `allowed_contacts` and `permissions_config`).
 """
 
-import asyncio
-import json
 import logging
 import re
 import uuid
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from app.core.config import settings
+from app.core.mongo import get_db
 
 logger = logging.getLogger(__name__)
+
+_CONFIG_ID = "singleton"
 
 
 def _normalize_phone(phone: str) -> str:
@@ -58,165 +57,113 @@ def _now_iso() -> str:
     return datetime.utcnow().isoformat()
 
 
+def _strip_mongo_id(doc: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if doc is None:
+        return None
+    doc = dict(doc)
+    doc.pop("_id", None)
+    return doc
+
+
 class AllowedContactsService:
-    """JSON-backed CRUD for the assistant's allow-list of contacts."""
+    """MongoDB-backed CRUD for the assistant's allow-list of contacts."""
 
-    def __init__(self, storage_path: Optional[Path] = None) -> None:
-        base = Path(storage_path or settings.WA_STORE_PATH)
-        self._path = base / "allowed_contacts.json"
-        self._lock = asyncio.Lock()
-        self._enabled: bool = False
-        self._contacts: List[Dict[str, Any]] = []
-        self._loaded = False
-
-    # ─── Load / Save ─────────────────────────────────────────────────────
-
-    def _load_sync(self) -> None:
-        """Read the JSON file into memory. Tolerates missing/corrupt files."""
-        if not self._path.exists():
-            self._enabled = False
-            self._contacts = []
-            self._loaded = True
-            return
-
-        try:
-            with self._path.open("r", encoding="utf-8") as fh:
-                data = json.load(fh)
-            self._enabled = bool(data.get("enabled", False))
-            self._contacts = list(data.get("contacts", []))
-        except (json.JSONDecodeError, OSError) as e:
-            logger.error(f"Failed to read {self._path}: {e}. Starting empty.")
-            self._enabled = False
-            self._contacts = []
-        self._loaded = True
-
-    def _save_sync(self) -> None:
-        """Write the current state to disk atomically."""
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_suffix(".json.tmp")
-        with tmp.open("w", encoding="utf-8") as fh:
-            json.dump(
-                {"enabled": self._enabled, "contacts": self._contacts},
-                fh,
-                indent=2,
-                ensure_ascii=False,
-            )
-        tmp.replace(self._path)
-
-    async def _ensure_loaded(self) -> None:
-        if not self._loaded:
-            self._load_sync()
+    def __init__(self) -> None:
+        pass
 
     # ─── Public state ────────────────────────────────────────────────────
 
     async def get_state(self) -> Dict[str, Any]:
-        async with self._lock:
-            await self._ensure_loaded()
-            return {
-                "enabled": self._enabled,
-                "contacts": list(self._contacts),
-            }
+        db = get_db()
+        cfg = await db.permissions_config.find_one({"_id": _CONFIG_ID})
+        enabled = bool(cfg.get("enabled")) if cfg else False
+        contacts = [_strip_mongo_id(c) async for c in db.allowed_contacts.find({})]
+        return {"enabled": enabled, "contacts": contacts}
 
     async def set_enabled(self, enabled: bool) -> Dict[str, Any]:
-        async with self._lock:
-            await self._ensure_loaded()
-            self._enabled = bool(enabled)
-            self._save_sync()
-            return {"enabled": self._enabled, "contacts": list(self._contacts)}
+        db = get_db()
+        await db.permissions_config.update_one(
+            {"_id": _CONFIG_ID}, {"$set": {"enabled": bool(enabled)}}, upsert=True
+        )
+        return await self.get_state()
 
     async def is_enabled(self) -> bool:
-        async with self._lock:
-            await self._ensure_loaded()
-            return self._enabled
+        db = get_db()
+        cfg = await db.permissions_config.find_one({"_id": _CONFIG_ID})
+        return bool(cfg.get("enabled")) if cfg else False
 
     # ─── CRUD ────────────────────────────────────────────────────────────
 
     async def list_contacts(self) -> List[Dict[str, Any]]:
-        async with self._lock:
-            await self._ensure_loaded()
-            return list(self._contacts)
+        db = get_db()
+        return [_strip_mongo_id(c) async for c in db.allowed_contacts.find({})]
 
     async def get_contact(self, contact_id: str) -> Optional[Dict[str, Any]]:
-        async with self._lock:
-            await self._ensure_loaded()
-            return next((c for c in self._contacts if c["id"] == contact_id), None)
+        db = get_db()
+        doc = await db.allowed_contacts.find_one({"id": contact_id})
+        return _strip_mongo_id(doc)
 
     async def add_contact(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        async with self._lock:
-            await self._ensure_loaded()
-            phone = _normalize_phone(payload.get("phone", ""))
-            if not phone:
-                raise ValueError("phone is required and must contain digits")
+        db = get_db()
+        phone = _normalize_phone(payload.get("phone", ""))
+        if not phone:
+            raise ValueError("phone is required and must contain digits")
 
-            # Deduplicate by normalized phone (tolerant of country-code differences)
-            if any(_phones_match(c.get("phone", ""), phone) for c in self._contacts):
-                raise ValueError(f"A contact with phone {phone} is already on the allow-list")
+        # Deduplicate by normalized phone (tolerant of country-code differences)
+        existing = [c async for c in db.allowed_contacts.find({})]
+        if any(_phones_match(c.get("phone", ""), phone) for c in existing):
+            raise ValueError(f"A contact with phone {phone} is already on the allow-list")
 
-            now = _now_iso()
-            contact = {
-                "id": uuid.uuid4().hex,
-                "name": payload.get("name", "").strip() or phone,
-                "phone": phone,
-                "relation": payload.get("relation"),
-                "llm_friendly_names": list(payload.get("llm_friendly_names") or []),
-                "tags": list(payload.get("tags") or []),
-                "notes": payload.get("notes"),
-                "attributes": dict(payload.get("attributes") or {}),
-                "enabled": bool(payload.get("enabled", True)),
-                "created_at": now,
-                "updated_at": now,
-            }
-            self._contacts.append(contact)
-            self._save_sync()
-            return contact
+        now = _now_iso()
+        contact = {
+            "id": uuid.uuid4().hex,
+            "name": payload.get("name", "").strip() or phone,
+            "phone": phone,
+            "relation": payload.get("relation"),
+            "llm_friendly_names": list(payload.get("llm_friendly_names") or []),
+            "tags": list(payload.get("tags") or []),
+            "notes": payload.get("notes"),
+            "attributes": dict(payload.get("attributes") or {}),
+            "enabled": bool(payload.get("enabled", True)),
+            "created_at": now,
+            "updated_at": now,
+        }
+        await db.allowed_contacts.insert_one(contact)
+        return _strip_mongo_id(contact)
 
     async def update_contact(
         self, contact_id: str, patch: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
-        async with self._lock:
-            await self._ensure_loaded()
-            contact = next((c for c in self._contacts if c["id"] == contact_id), None)
-            if contact is None:
-                return None
+        db = get_db()
+        contact = await db.allowed_contacts.find_one({"id": contact_id})
+        if contact is None:
+            return None
 
-            for key in (
-                "name",
-                "relation",
-                "notes",
-                "enabled",
-                "llm_friendly_names",
-                "tags",
-                "attributes",
-            ):
-                if key in patch and patch[key] is not None:
-                    contact[key] = patch[key]
+        updates: Dict[str, Any] = {}
+        for key in (
+            "name", "relation", "notes", "enabled",
+            "llm_friendly_names", "tags", "attributes",
+        ):
+            if key in patch and patch[key] is not None:
+                updates[key] = patch[key]
 
-            if patch.get("phone") is not None:
-                new_phone = _normalize_phone(patch["phone"])
-                if not new_phone:
-                    raise ValueError("phone must contain digits")
-                if any(
-                    c["id"] != contact_id and _phones_match(c.get("phone", ""), new_phone)
-                    for c in self._contacts
-                ):
-                    raise ValueError(
-                        f"Another contact already has phone {new_phone}"
-                    )
-                contact["phone"] = new_phone
+        if patch.get("phone") is not None:
+            new_phone = _normalize_phone(patch["phone"])
+            if not new_phone:
+                raise ValueError("phone must contain digits")
+            others = [c async for c in db.allowed_contacts.find({"id": {"$ne": contact_id}})]
+            if any(_phones_match(c.get("phone", ""), new_phone) for c in others):
+                raise ValueError(f"Another contact already has phone {new_phone}")
+            updates["phone"] = new_phone
 
-            contact["updated_at"] = _now_iso()
-            self._save_sync()
-            return contact
+        updates["updated_at"] = _now_iso()
+        await db.allowed_contacts.update_one({"id": contact_id}, {"$set": updates})
+        return await self.get_contact(contact_id)
 
     async def delete_contact(self, contact_id: str) -> bool:
-        async with self._lock:
-            await self._ensure_loaded()
-            before = len(self._contacts)
-            self._contacts = [c for c in self._contacts if c["id"] != contact_id]
-            changed = len(self._contacts) != before
-            if changed:
-                self._save_sync()
-            return changed
+        db = get_db()
+        result = await db.allowed_contacts.delete_one({"id": contact_id})
+        return result.deleted_count > 0
 
     # ─── Enforcement ─────────────────────────────────────────────────────
 
@@ -225,12 +172,11 @@ class AllowedContactsService:
         target = _normalize_phone(phone)
         if not target:
             return None
-        async with self._lock:
-            await self._ensure_loaded()
-            return next(
-                (c for c in self._contacts if _phones_match(c.get("phone", ""), target)),
-                None,
-            )
+        db = get_db()
+        async for c in db.allowed_contacts.find({}):
+            if _phones_match(c.get("phone", ""), target):
+                return _strip_mongo_id(c)
+        return None
 
     async def check_allowed(self, phone: str) -> Dict[str, Any]:
         """
@@ -240,66 +186,56 @@ class AllowedContactsService:
         whichever matching entry was found (or None). When it's ON, sends are
         only allowed if the phone matches an entry with `enabled=True`.
         """
-        async with self._lock:
-            await self._ensure_loaded()
-            enforced = self._enabled
-            target = _normalize_phone(phone)
-            contact = (
-                next(
-                    (
-                        c
-                        for c in self._contacts
-                        if _phones_match(c.get("phone", ""), target)
-                    ),
-                    None,
-                )
-                if target
-                else None
-            )
+        db = get_db()
+        cfg = await db.permissions_config.find_one({"_id": _CONFIG_ID})
+        enforced = bool(cfg.get("enabled")) if cfg else False
+        target = _normalize_phone(phone)
 
-            if not enforced:
-                return {
-                    "phone": target or phone,
-                    "allowed": True,
-                    "enforced": False,
-                    "contact": contact,
-                    "reason": None,
-                }
+        contact = await self.find_by_phone(target) if target else None
 
-            if not target:
-                return {
-                    "phone": phone,
-                    "allowed": False,
-                    "enforced": True,
-                    "contact": None,
-                    "reason": "phone could not be parsed",
-                }
-
-            if contact is None:
-                return {
-                    "phone": target,
-                    "allowed": False,
-                    "enforced": True,
-                    "contact": None,
-                    "reason": "not on the allow-list",
-                }
-
-            if not contact.get("enabled", True):
-                return {
-                    "phone": target,
-                    "allowed": False,
-                    "enforced": True,
-                    "contact": contact,
-                    "reason": "contact is disabled in the allow-list",
-                }
-
+        if not enforced:
             return {
-                "phone": target,
+                "phone": target or phone,
                 "allowed": True,
-                "enforced": True,
+                "enforced": False,
                 "contact": contact,
                 "reason": None,
             }
+
+        if not target:
+            return {
+                "phone": phone,
+                "allowed": False,
+                "enforced": True,
+                "contact": None,
+                "reason": "phone could not be parsed",
+            }
+
+        if contact is None:
+            return {
+                "phone": target,
+                "allowed": False,
+                "enforced": True,
+                "contact": None,
+                "reason": "not on the allow-list",
+            }
+
+        if not contact.get("enabled", True):
+            return {
+                "phone": target,
+                "allowed": False,
+                "enforced": True,
+                "contact": contact,
+                "reason": "contact is disabled in the allow-list",
+            }
+
+        return {
+            "phone": target,
+            "allowed": True,
+            "enforced": True,
+            "contact": contact,
+            "reason": None,
+        }
 
 
 # Module-level singleton — all routers and the WhatsApp client share this.

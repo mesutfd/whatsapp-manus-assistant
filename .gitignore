@@ -12,6 +12,7 @@ venv/
 
 # Environment
 .env
+.env.instance*
 
 # Data (session & messages - sensitive)
 data/

@@ -32,7 +32,12 @@ class Settings(BaseSettings):
     WA_DATABASE_PATH: str = "/app/data/whatsapp.db"
     WA_STORE_PATH: str = "/app/data"
 
-    # App-level persistence (rules, scheduled sends, personas, quiet hours)
+    # App-level persistence (rules, scheduled sends, personas, quiet hours,
+    # permissions, messages) lives in MongoDB. APP_DB_PATH/MESSAGE_STORE_DB
+    # below are legacy SQLite paths, kept only so scripts/migrate_to_mongo.py
+    # can read old data for the one-time migration.
+    MONGO_URI: str = "mongodb://mongo:27017"
+    MONGO_DB_NAME: str = "ideep_whatsapp"
     APP_DB_PATH: str = "/app/data/app.db"
 
     # Auto-Reply (defaults seeded into DB on first run; live values come from DB)

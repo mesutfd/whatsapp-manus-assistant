@@ -302,7 +302,11 @@ async def _resolve_recipient(identifier: str) -> Optional[dict]:
         sender_name = msg.get("sender_name", "")
         if sender_name and identifier.lower() in sender_name.lower():
             from_jid = msg.get("from", "") or msg.get("chat_jid", "")
-            phone = from_jid.split("@")[0] if "@" in from_jid else from_jid
+            # from_jid may be a `<opaque>@lid` privacy address rather than a
+            # phone number — prefer the resolved real phone when we have it,
+            # so sending doesn't end up targeting the LID digits.
+            resolved_phone = msg.get("from_phone")
+            phone = resolved_phone or (from_jid.split("@")[0] if "@" in from_jid else from_jid)
             return {
                 "name": sender_name,
                 "phone": phone,

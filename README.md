@@ -51,6 +51,42 @@ cp .env .env
 
 ---
 
+## 🧩 Multi-Instance Deployment
+
+`docker-compose.yml` runs **two independent bot instances** (e.g. one WhatsApp
+number behind `wa1.cumran.ir`, another behind `wa2.cumran.ir`), sharing a
+single Mongo container but writing to separate logical databases:
+
+| Instance | Container | Host port (loopback only) | Env file | Mongo DB | Data volume |
+|---|---|---|---|---|---|
+| 1 | `ideep-whatsapp-bot-1` | `127.0.0.1:8011` | `.env.instance1` | `ideep_whatsapp` | `./data/instance1` |
+| 2 | `ideep-whatsapp-bot-2` | `127.0.0.1:8012` | `.env.instance2` | `ideep_whatsapp_2` | `./data/instance2` |
+
+Each instance has its own WhatsApp session (own QR login), its own
+`API_KEY`/`JWT_SECRET`, and its own Mongo database/collections — but they
+share the same `mongo` container and Docker image build. To add a third
+instance, copy the `whatsapp-bot-2` block, give it a new container name, host
+port, `env_file`, volume path, and a unique `MONGO_DB_NAME`.
+
+Ports are bound to `127.0.0.1` only — neither instance publishes to the
+public interface or to 80/443. Point your own host-level reverse proxy
+(nginx, Caddy, Traefik, etc., set up outside this compose stack) at the two
+loopback ports, e.g.:
+
+```
+wa1.cumran.ir  -> 127.0.0.1:8011
+wa2.cumran.ir  -> 127.0.0.1:8012
+```
+
+The proxy terminates TLS; these containers only ever speak plain HTTP on
+loopback.
+
+Start everything with:
+
+```bash
+docker compose up -d
+```
+
 ## 🤖 iDeep AI Assistant
 
 The iDeep AI Assistant is a built-in feature that can automatically reply to messages when you are away.

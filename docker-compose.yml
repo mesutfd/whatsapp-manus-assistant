@@ -1,37 +1,50 @@
 ###############################################################################
 # iDeep WhatsApp Bot API - Docker Compose Configuration
+# Two isolated bot instances (separate WhatsApp sessions + separate Mongo
+# databases) sharing a single Mongo server. Front each instance with your own
+# reverse proxy on the host (e.g. wa1.cumran.ir -> 127.0.0.1:8011,
+# wa2.cumran.ir -> 127.0.0.1:8012). Neither service publishes 80/443.
+#
 # Run: docker compose up -d
 ###############################################################################
 
-version: "3.9"
+x-whatsapp-bot: &whatsapp-bot-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  restart: always
+  depends_on:
+    - mongo
+  environment:
+    - HOST=0.0.0.0
+    - PORT=8000
+    - WA_DATABASE_PATH=/app/data/whatsapp.db
+    - WA_STORE_PATH=/app/data
+    - LOG_FILE=/app/data/logs/app.log
+    - MONGO_URI=mongodb://mongo:27017
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+    interval: 30s
+    timeout: 10s
+    retries: 3
+    start_period: 15s
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "10m"
+      max-file: "3"
+  networks:
+    - ideep-network
 
 services:
-  whatsapp-bot:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: ideep-whatsapp-bot
+  mongo:
+    image: mongo:7
+    container_name: ideep-mongo
     restart: always
-    ports:
-      - "${PORT:-8000}:8000"
+    # No `ports:` mapping on purpose — only reachable from other containers
+    # on ideep-network via the service name "mongo", never from the host.
     volumes:
-      # Persist WhatsApp session data and message store
-      - ./data:/app/data
-    env_file:
-      - .env
-    environment:
-      - HOST=0.0.0.0
-      - PORT=8000
-      - WA_DATABASE_PATH=/app/data/whatsapp.db
-      - WA_STORE_PATH=/app/data
-      - MESSAGE_STORE_DB=/app/data/messages.db
-      - LOG_FILE=/app/data/logs/app.log
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
+      - ./data/mongo:/data/db
     logging:
       driver: "json-file"
       options:
@@ -39,6 +52,30 @@ services:
         max-file: "3"
     networks:
       - ideep-network
+
+  # ── Instance 1 — e.g. wa1.cumran.ir ────────────────────────────────────────
+  whatsapp-bot-1:
+    <<: *whatsapp-bot-common
+    container_name: ideep-whatsapp-bot-1
+    env_file:
+      - .env.instance1
+    volumes:
+      - ./data/instance1:/app/data
+    ports:
+      # Bound to loopback only — your host-level reverse proxy talks to this,
+      # the container itself never sees 80/443 or the public interface.
+      - "127.0.0.1:8011:8000"
+
+  # ── Instance 2 — e.g. wa2.cumran.ir ────────────────────────────────────────
+  whatsapp-bot-2:
+    <<: *whatsapp-bot-common
+    container_name: ideep-whatsapp-bot-2
+    env_file:
+      - .env.instance2
+    volumes:
+      - ./data/instance2:/app/data
+    ports:
+      - "127.0.0.1:8012:8000"
 
 networks:
   ideep-network:

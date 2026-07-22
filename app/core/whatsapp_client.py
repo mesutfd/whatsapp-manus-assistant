@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import time
 from datetime import datetime
 from enum import Enum
@@ -67,6 +68,10 @@ class WhatsAppClientManager:
         self._event_handlers: Dict[str, List[Callable]] = {}
         self._message_store: List[Dict] = []
         self._contacts_cache: Dict[str, Dict] = {}
+        # LID (WhatsApp's privacy-mode addressing, `<opaque>@lid`) -> real
+        # phone number, resolved from whatsmeow's own lid_map table and
+        # cached in-process since the mapping never changes for a given LID.
+        self._lid_pn_cache: Dict[str, str] = {}
         self._is_running: bool = False
         self._connection_task: Optional[asyncio.Task] = None
         # Periodic watcher that detects silent session expiry (whatsmeow keeps
@@ -120,6 +125,36 @@ class WhatsAppClientManager:
         digits = re.sub(r"\D", "", phone)
         return digits
 
+    def _resolve_lid_phone(self, lid_jid: str) -> Optional[str]:
+        """
+        Resolve a `<opaque>@lid` JID to the real `<phone>@s.whatsapp.net` JID
+        using whatsmeow's own lid<->phone-number map (whatsmeow_lid_map),
+        which it populates automatically from WhatsApp protocol metadata
+        (contact sync, message SenderAlt, etc.) — independent of whatever
+        SenderAlt this specific message did or didn't carry.
+
+        Returns None if the JID isn't a LID or the mapping isn't known yet.
+        """
+        if not lid_jid or "@lid" not in lid_jid:
+            return None
+        lid_user = lid_jid.split("@", 1)[0]
+        if lid_user in self._lid_pn_cache:
+            return self._lid_pn_cache[lid_user]
+        try:
+            with sqlite3.connect(settings.WA_DATABASE_PATH, timeout=2.0) as con:
+                cur = con.execute(
+                    "SELECT pn FROM whatsmeow_lid_map WHERE lid = ?", (lid_user,)
+                )
+                row = cur.fetchone()
+        except Exception as e:
+            logger.debug("LID map lookup failed for %s: %s", lid_user, e)
+            return None
+        if not row or not row[0]:
+            return None
+        resolved = f"{row[0]}@s.whatsapp.net"
+        self._lid_pn_cache[lid_user] = resolved
+        return resolved
+
     @property
     def qr_data(self) -> Optional[str]:
         return self._qr_data
@@ -166,10 +201,25 @@ class WhatsAppClientManager:
         except Exception as e:
             logger.warning(f"Could not sync assistant config from DB: {e}")
 
+    async def _load_message_store_from_db(self) -> None:
+        """Hydrate the in-memory message store from persisted history so
+        restarts (and any imported historical messages) survive."""
+        if not settings.MESSAGE_STORE_ENABLED:
+            return
+        try:
+            from app.core.message_history import message_history_db
+
+            await message_history_db.initialize()
+            self._message_store = await message_history_db.load_recent(settings.MAX_STORED_MESSAGES)
+            logger.info("Loaded %d messages from persisted history", len(self._message_store))
+        except Exception as e:
+            logger.warning(f"Could not load persisted message history: {e}")
+
     async def initialize(self):
         """Initialize the WhatsApp client with event handlers."""
         logger.info("Initializing WhatsApp client...")
         await self._sync_settings_from_db()
+        await self._load_message_store_from_db()
 
         self._client = NewAClient(
             settings.WA_DATABASE_PATH,
@@ -570,7 +620,7 @@ class WhatsAppClientManager:
         # /messages/history alongside incoming messages.
         if settings.MESSAGE_STORE_ENABLED:
             chat_jid = Jid2String(target_jid)
-            self._message_store.append({
+            sent_record = {
                 "id": msg_id,
                 "from": "me",
                 "chat_jid": chat_jid,
@@ -580,9 +630,11 @@ class WhatsAppClientManager:
                 "is_group": False,
                 "is_from_me": True,
                 "type": "text",
-            })
+            }
+            self._message_store.append(sent_record)
             if len(self._message_store) > settings.MAX_STORED_MESSAGES:
                 self._message_store = self._message_store[-settings.MAX_STORED_MESSAGES:]
+            await self._persist_message(sent_record)
 
         logger.info(f"Message sent to {normalized} (id={msg_id})")
         await self._emit_event("message_sent", result)
@@ -645,7 +697,9 @@ class WhatsAppClientManager:
         jid_str = phone if "@" in phone else f"{phone}@s.whatsapp.net"
         messages = [
             msg for msg in self._message_store
-            if msg.get("chat_jid", "").startswith(phone) or msg.get("from", "").startswith(phone)
+            if msg.get("chat_jid", "").startswith(phone)
+            or msg.get("from", "").startswith(phone)
+            or (msg.get("from_phone") or "").startswith(phone)
         ]
         return messages[-limit:]
 
@@ -661,7 +715,12 @@ class WhatsAppClientManager:
             if query_lower in text or query_lower in sender_name:
                 if contact:
                     contact_lower = contact.lower()
-                    if contact_lower in msg.get("from", "").lower() or contact_lower in sender_name:
+                    from_phone = (msg.get("from_phone") or "").lower()
+                    if (
+                        contact_lower in msg.get("from", "").lower()
+                        or contact_lower in sender_name
+                        or (from_phone and contact_lower in from_phone)
+                    ):
                         results.append(msg)
                 else:
                     results.append(msg)
@@ -832,7 +891,11 @@ class WhatsAppClientManager:
             return True, quiet_msg, None
 
         rules = await db.list_rules()
-        sender_phone = self.normalize_phone(sender_jid)
+        # Prefer the resolved phone form so phone-keyed rules still match
+        # senders WhatsApp addressed via LID (privacy-mode addressing).
+        sender_phone = (
+            self.normalize_phone(sender_jid_alt) if sender_jid_alt else self.normalize_phone(sender_jid)
+        )
         now_ts = time.time()
 
         matched_rule: Optional[Dict[str, Any]] = None
@@ -978,6 +1041,15 @@ class WhatsAppClientManager:
             history.append({"role": role, "content": text})
         return history[-limit:]
 
+    async def _persist_message(self, msg_record: Dict[str, Any]) -> None:
+        """Write a message record to the persisted history DB (best-effort)."""
+        try:
+            from app.core.message_history import message_history_db
+
+            await message_history_db.insert(msg_record, source="live")
+        except Exception as e:
+            logger.warning(f"Failed to persist message {msg_record.get('id')}: {e}")
+
     # ─── Event System ────────────────────────────────────────────────────
 
     def on_event(self, event_type: str, handler: Callable):
@@ -1033,15 +1105,29 @@ class WhatsAppClientManager:
                     sender_jid_alt = Jid2String(alt)
             except Exception:
                 sender_jid_alt = None
+            # This message didn't carry SenderAlt — fall back to whatsmeow's
+            # own durable lid_map (built from prior contact/history sync),
+            # rather than leaving LID-addressed senders unresolved.
+            if sender_jid_alt is None and sender_jid.endswith("@lid"):
+                sender_jid_alt = self._resolve_lid_phone(sender_jid)
             chat_jid = Jid2String(info.MessageSource.Chat) if info.MessageSource.Chat else "unknown"
             sender_name = info.Pushname if hasattr(info, 'Pushname') else sender_jid
             is_group = info.MessageSource.IsGroup if hasattr(info.MessageSource, 'IsGroup') else False
             is_from_me = info.MessageSource.IsFromMe if hasattr(info.MessageSource, 'IsFromMe') else False
 
+            # Resolved phone digits for this sender, regardless of whether
+            # WhatsApp addressed the message by phone or by LID — lets
+            # phone-based lookups/search/rules work the same either way.
+            if sender_jid.endswith("@lid"):
+                from_phone = self.normalize_phone(sender_jid_alt) if sender_jid_alt else None
+            else:
+                from_phone = self.normalize_phone(sender_jid)
+
             # Build message record
             msg_record = {
                 "id": info.ID if hasattr(info, 'ID') else str(time.time()),
                 "from": sender_jid,
+                "from_phone": from_phone,
                 "chat_jid": chat_jid,
                 "sender_name": sender_name,
                 "text": text,
@@ -1056,6 +1142,7 @@ class WhatsAppClientManager:
                 self._message_store.append(msg_record)
                 if len(self._message_store) > settings.MAX_STORED_MESSAGES:
                     self._message_store = self._message_store[-settings.MAX_STORED_MESSAGES:]
+                await self._persist_message(msg_record)
 
             logger.info(f"Message from {sender_name} ({sender_jid}): {text[:100]}")
 
@@ -1122,6 +1209,12 @@ class WhatsAppClientManager:
     def get_stored_messages(self, limit: int = 100, offset: int = 0) -> List[Dict]:
         """Get stored messages with pagination."""
         return self._message_store[-(offset + limit):-offset if offset else None]
+
+    async def reload_message_store(self) -> int:
+        """Re-hydrate the in-memory store from the persisted DB (e.g. after
+        an import) without requiring a process restart."""
+        await self._load_message_store_from_db()
+        return len(self._message_store)
 
 
 # Singleton instance
