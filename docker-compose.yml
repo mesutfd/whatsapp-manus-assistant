@@ -11,7 +11,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: ideep-whatsapp-bot
-    restart: unless-stopped
+    restart: always
     ports:
       - "${PORT:-8000}:8000"
     volumes:
