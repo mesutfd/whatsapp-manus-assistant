@@ -664,25 +664,31 @@ class WhatsAppClientManager:
         return await self.send_message(phone, message)
 
     async def get_contacts(self) -> List[Dict[str, Any]]:
-        """Get all contacts from WhatsApp."""
+        """Get all known contacts.
+
+        Neonize's client has no all-contacts lookup, and WhatsApp doesn't
+        sync the phone's own saved contact names to linked devices anyway —
+        so the only names available here are each person's self-declared
+        WhatsApp push name, seen on messages they've sent us. Derived from
+        stored history rather than any live API call.
+        """
         if not self.is_connected:
             raise ConnectionError("WhatsApp is not connected")
 
-        try:
-            contacts = await self._client.get_all_contacts()
-            result = []
-            for contact in contacts:
-                contact_info = {
-                    "jid": Jid2String(contact.JID) if hasattr(contact, 'JID') else str(contact),
-                    "name": getattr(contact, 'FullName', None) or getattr(contact, 'PushName', None) or getattr(contact, 'BusinessName', None) or "Unknown",
-                    "phone": getattr(contact, 'Phone', None),
-                }
-                result.append(contact_info)
-            self._contacts_cache = {c["jid"]: c for c in result}
-            return result
-        except Exception as e:
-            logger.error(f"Failed to get contacts: {e}")
-            return []
+        result: Dict[str, Dict[str, Any]] = {}
+        for msg in self._message_store:
+            if msg.get("is_from_me") or msg.get("is_group"):
+                continue
+            jid = msg.get("from") or msg.get("chat_jid")
+            name = msg.get("sender_name")
+            if not jid or jid == "unknown":
+                continue
+            existing = result.get(jid)
+            if not existing or (name and not existing.get("name")):
+                result[jid] = {"jid": jid, "name": name or "Unknown", "phone": msg.get("from_phone")}
+
+        self._contacts_cache = result
+        return list(result.values())
 
     async def get_chats(self) -> List[Dict[str, Any]]:
         """Get recent chats/conversations."""

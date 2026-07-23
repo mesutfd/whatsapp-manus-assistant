@@ -156,15 +156,37 @@ async def smart_search(request: SmartSearchRequest, user: dict = Depends(get_cur
     if request.contact:
         contacts = await wa_client.get_contacts()
         match = resolve_single_contact(request.contact, contacts, threshold=0.4)
-        if match:
-            resolved_contact = {
-                "name": match.get("name"),
-                "phone": match.get("phone"),
-                "jid": match.get("jid"),
-                "match_score": match.get("match_score"),
+        if not match:
+            # Important: do NOT fall through to an unfiltered search here —
+            # that would silently return every stored message under the
+            # guise of a contact-filtered search. WhatsApp only exposes each
+            # person's self-set display name, not names saved in your
+            # phone's address book, so lookups by a saved name legitimately
+            # fail; the caller needs to know that explicitly.
+            return {
+                "query": request.query,
+                "contact_filter": request.contact,
+                "contact_resolved": False,
+                "resolved_contact": None,
+                "results": [],
+                "total_matches": 0,
+                "note": (
+                    f"No WhatsApp contact matched '{request.contact}'. WhatsApp only "
+                    "knows each person's self-declared display name, not names saved "
+                    "in your phone's address book. Resolve the name to a phone number "
+                    "first (e.g. via the phone's own Contacts app), then retry with "
+                    "`contact` set to that phone number, or omit `contact` to search "
+                    "across all messages."
+                ),
             }
-            # Use the JID or name for filtering
-            contact_filter = match.get("jid") or match.get("name")
+        resolved_contact = {
+            "name": match.get("name"),
+            "phone": match.get("phone"),
+            "jid": match.get("jid"),
+            "match_score": match.get("match_score"),
+        }
+        # Use the JID or name for filtering
+        contact_filter = match.get("jid") or match.get("name")
 
     # Search messages
     results = await wa_client.search_messages(request.query, contact_filter)
@@ -172,6 +194,7 @@ async def smart_search(request: SmartSearchRequest, user: dict = Depends(get_cur
     return {
         "query": request.query,
         "contact_filter": request.contact,
+        "contact_resolved": bool(resolved_contact),
         "resolved_contact": resolved_contact,
         "results": results[:request.limit],
         "total_matches": len(results),
