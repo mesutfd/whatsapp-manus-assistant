@@ -8,16 +8,17 @@ text `#bot off` and silence the assistant.
 Two channels:
   - Any chat, prefixed:   `#mute` / `#unmute` / `#status` act on that chat;
                           `#bot off [2h]` / `#bot on` (or `#off` / `#on`)
-                          act globally.
+                          act globally; `#bot instructions` (or `#instructions`)
+                          replies with the command list.
   - The designated control chat: the same commands work bare, without the
-    prefix (`off`, `on`, `off 2h`, `status`, `mute`, `unmute`).
+    prefix (`off`, `on`, `off 2h`, `status`, `mute`, `unmute`, `instructions`).
 """
 
 import re
 from dataclasses import dataclass
 from typing import Optional
 
-# Actions: global_on | global_off | mute | unmute | status
+# Actions: global_on | global_off | mute | unmute | status | instructions
 @dataclass
 class Command:
     action: str
@@ -69,6 +70,8 @@ def _parse_tokens(tokens: list) -> Optional[Command]:
         return Command(action="unmute")
     if head == "status" and not rest:
         return Command(action="status")
+    if head in {"instructions", "help"} and not rest:
+        return Command(action="instructions")
     return None
 
 

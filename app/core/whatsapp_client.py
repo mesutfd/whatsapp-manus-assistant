@@ -1045,6 +1045,9 @@ class WhatsAppClientManager:
         elif cmd.action == "status":
             await self._send_status_report(client, info, cfg, chat_key, control)
             ack = "status sent"
+        elif cmd.action == "instructions":
+            await self._send_instructions(client, info, prefix, is_control_chat)
+            ack = "instructions sent"
 
         logger.info("Owner command %r in chat %s: %s", cmd.raw, chat_key, ack)
         await self._emit_event("command_executed", {
@@ -1082,6 +1085,31 @@ class WhatsAppClientManager:
             self._remember_bot_send(getattr(resp, "ID", "") or "")
         except Exception as e:
             logger.warning(f"Could not send status report: {e}")
+
+    async def _send_instructions(
+        self, client: NewAClient, info: Any, prefix: str, is_control_chat: bool
+    ) -> None:
+        """Reply immediately (no LLM round-trip) with the owner command list,
+        each with a Persian description, in whichever chat asked for it."""
+        rows = [
+            (f"{prefix}bot on", "روشن کردن پاسخ‌دهی خودکار ربات"),
+            (f"{prefix}bot off", "خاموش کردن پاسخ‌دهی خودکار ربات"),
+            (f"{prefix}bot off 2h", "خاموش کردن موقت ربات برای مدت مشخص (مثلاً ۲ ساعت یا ۳۰m)"),
+            (f"{prefix}mute", "بی‌صدا کردن ربات فقط در همین گفتگو"),
+            (f"{prefix}unmute", "فعال کردن دوباره ربات در همین گفتگو"),
+            (f"{prefix}status", "نمایش وضعیت فعلی ربات (روشن/خاموش، تعداد گفتگوهای بی‌صدا و…)"),
+            (f"{prefix}bot instructions", "نمایش همین راهنما"),
+        ]
+        blocks = [f"*{settings.ASSISTANT_NAME} — دستورات ربات*"]
+        blocks += [f"`{cmd}`\n{desc}" for cmd, desc in rows]
+        if is_control_chat:
+            blocks.append("در همین گفتگوی کنترل، دستورات بدون علامت هم کار می‌کنند (مثلاً `off` یا `status`).")
+
+        try:
+            resp = await client.send_message(info.MessageSource.Chat, "\n\n".join(blocks))
+            self._remember_bot_send(getattr(resp, "ID", "") or "")
+        except Exception as e:
+            logger.warning(f"Could not send instructions: {e}")
 
     async def _react_to_message(self, client: NewAClient, info: Any, emoji: str) -> None:
         """Best-effort emoji acknowledgment on the owner's command message."""
