@@ -809,6 +809,19 @@ class IDeepApp {
 
     // ─── Assistant config ───────────────────────────────────────────────
 
+    // Minutes fields where 0 means "off" server-side; a checkbox next to the
+    // label lets the user disable the rule without losing their preferred
+    // number, which stays in the input (just greyed out) for next time.
+    setHoldRuleField(inputId, toggleId, value, fallback) {
+        const input = document.getElementById(inputId);
+        const toggle = document.getElementById(toggleId);
+        const minutes = value ?? fallback;
+        const enabled = minutes > 0;
+        input.value = minutes > 0 ? minutes : fallback;
+        toggle.checked = enabled;
+        input.disabled = !enabled;
+    }
+
     async loadAssistantConfig() {
         try {
             const data = await this.api('GET', '/api/v1/assistant/config');
@@ -827,8 +840,8 @@ class IDeepApp {
             document.getElementById('quietDefer').checked = qh.defer_scheduled !== false;
 
             document.getElementById('replyDelaySeconds').value = data.reply_delay_seconds ?? 60;
-            document.getElementById('humanSnoozeMinutes').value = data.human_snooze_minutes ?? 30;
-            document.getElementById('readHoldMinutes').value = data.read_hold_minutes ?? 5;
+            this.setHoldRuleField('humanSnoozeMinutes', 'humanSnoozeEnabled', data.human_snooze_minutes, 30);
+            this.setHoldRuleField('readHoldMinutes', 'readHoldEnabled', data.read_hold_minutes, 5);
             document.getElementById('commandPrefix').value = data.command_prefix || '#';
             document.getElementById('controlContact').value = data.control_contact || '';
             this.renderMutedChats(data.muted_chats || []);
@@ -855,8 +868,10 @@ class IDeepApp {
                 defer_scheduled: document.getElementById('quietDefer').checked,
             },
             reply_delay_seconds: parseInt(document.getElementById('replyDelaySeconds').value, 10) || 0,
-            human_snooze_minutes: parseInt(document.getElementById('humanSnoozeMinutes').value, 10) || 0,
-            read_hold_minutes: parseInt(document.getElementById('readHoldMinutes').value, 10) || 0,
+            human_snooze_minutes: document.getElementById('humanSnoozeEnabled').checked
+                ? (parseInt(document.getElementById('humanSnoozeMinutes').value, 10) || 0) : 0,
+            read_hold_minutes: document.getElementById('readHoldEnabled').checked
+                ? (parseInt(document.getElementById('readHoldMinutes').value, 10) || 0) : 0,
             command_prefix: document.getElementById('commandPrefix').value || '#',
             control_contact: document.getElementById('controlContact').value.trim(),
         };
@@ -1430,6 +1445,12 @@ class IDeepApp {
 
         // Assistant
         document.getElementById('assistantForm').addEventListener('submit', (e) => { e.preventDefault(); this.saveAssistantConfig(); });
+        document.getElementById('humanSnoozeEnabled').addEventListener('change', (e) => {
+            document.getElementById('humanSnoozeMinutes').disabled = !e.target.checked;
+        });
+        document.getElementById('readHoldEnabled').addEventListener('change', (e) => {
+            document.getElementById('readHoldMinutes').disabled = !e.target.checked;
+        });
         document.getElementById('addRuleBtn').addEventListener('click', () => {
             const f = document.getElementById('addRuleForm');
             f.style.display = f.style.display === 'none' ? 'block' : 'none';

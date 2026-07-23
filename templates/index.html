@@ -330,12 +330,24 @@
                                     <p class="field-hint">Cancelled if you reply first. 0 = immediate.</p>
                                 </div>
                                 <div class="form-group" style="margin:0;">
-                                    <label>Back off after I reply (minutes)</label>
+                                    <div class="field-label-row">
+                                        <label>Back off after I reply (minutes)</label>
+                                        <label class="toggle toggle-sm" title="Enable/disable this rule">
+                                            <input type="checkbox" id="humanSnoozeEnabled" checked>
+                                            <span class="toggle-slider"></span>
+                                        </label>
+                                    </div>
                                     <input type="number" id="humanSnoozeMinutes" min="0" value="30">
                                     <p class="field-hint">Bot stays out of a chat you replied in.</p>
                                 </div>
                                 <div class="form-group" style="margin:0;">
-                                    <label>Hold after I read (minutes)</label>
+                                    <div class="field-label-row">
+                                        <label>Hold after I read (minutes)</label>
+                                        <label class="toggle toggle-sm" title="Enable/disable this rule">
+                                            <input type="checkbox" id="readHoldEnabled" checked>
+                                            <span class="toggle-slider"></span>
+                                        </label>
+                                    </div>
                                     <input type="number" id="readHoldMinutes" min="0" value="5">
                                     <p class="field-hint">Extra wait when you open the chat on your phone.</p>
                                 </div>
