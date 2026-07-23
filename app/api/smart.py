@@ -18,6 +18,7 @@ from app.core.config import settings
 from app.core.whatsapp_client import wa_client
 from app.services.allowed_contacts import allowed_contacts_service
 from app.utils.contact_resolver import resolve_contact, resolve_single_contact
+from app.utils.message_compact import compact_message
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/smart", tags=["Smart Actions (Manus Interface)"])
@@ -196,7 +197,7 @@ async def smart_search(request: SmartSearchRequest, user: dict = Depends(get_cur
         "contact_filter": request.contact,
         "contact_resolved": bool(resolved_contact),
         "resolved_contact": resolved_contact,
-        "results": results[:request.limit],
+        "results": [compact_message(m, 1500) for m in results[:request.limit]],
         "total_matches": len(results),
     }
 
@@ -244,7 +245,7 @@ async def smart_recent(
         msg for msg in wa_client._message_store
         if not msg.get("is_from_me", False)
     ]
-    recent = messages[-count:]
+    recent = [compact_message(m, 1500) for m in messages[-count:]]
     recent.reverse()  # Most recent first
 
     return {

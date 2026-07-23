@@ -690,36 +690,72 @@ class WhatsAppClientManager:
         self._contacts_cache = result
         return list(result.values())
 
-    async def get_chats(self) -> List[Dict[str, Any]]:
-        """Get recent chats/conversations."""
+    async def get_chats(self, messages_per_chat: int = 3) -> List[Dict[str, Any]]:
+        """Recent chats, newest activity first. Each chat carries only the
+        last `messages_per_chat` messages as a preview (the full store used
+        to be inlined per chat, which made the response explode for large
+        imported histories); use get_chat_messages for full paged history."""
         if not self.is_connected:
             raise ConnectionError("WhatsApp is not connected")
 
-        # Return stored messages grouped by chat
-        chats = {}
+        # Group stored messages (oldest -> newest) by chat.
+        chats: Dict[str, Dict[str, Any]] = {}
         for msg in self._message_store:
             chat_id = msg.get("chat_jid", msg.get("from", "unknown"))
-            if chat_id not in chats:
-                chats[chat_id] = {
+            chat = chats.get(chat_id)
+            if chat is None:
+                chat = chats[chat_id] = {
                     "chat_jid": chat_id,
                     "name": msg.get("sender_name", chat_id),
-                    "last_message": msg.get("text", ""),
-                    "last_timestamp": msg.get("timestamp", ""),
+                    "last_message": "",
+                    "last_timestamp": "",
                     "unread_count": 0,
+                    "message_count": 0,
                     "messages": [],
                 }
-            chats[chat_id]["messages"].append(msg)
-            chats[chat_id]["last_message"] = msg.get("text", "")
-            chats[chat_id]["last_timestamp"] = msg.get("timestamp", "")
+            chat["messages"].append(msg)
+            if len(chat["messages"]) > messages_per_chat:
+                chat["messages"].pop(0)
+            chat["message_count"] += 1
+            if not msg.get("is_from_me") and msg.get("sender_name"):
+                chat["name"] = msg["sender_name"]
+            chat["last_message"] = msg.get("text") or f"[{msg.get('type', 'message')}]"
+            chat["last_timestamp"] = msg.get("timestamp", "")
 
-        return list(chats.values())
+        return sorted(chats.values(), key=lambda c: c["last_timestamp"] or "", reverse=True)
 
-    async def get_chat_messages(self, phone: str, limit: int = 50) -> List[Dict[str, Any]]:
-        """Get messages from a specific chat."""
+    def _chat_jids_for_phone(self, phone: str) -> List[str]:
+        """All direct-chat JID forms seen for a phone (phone-form and LID-form
+        can both hold parts of one conversation's history)."""
+        jids = {
+            msg.get("chat_jid")
+            for msg in self._message_store
+            if not msg.get("is_group")
+            and (
+                msg.get("chat_jid", "").startswith(phone)
+                or msg.get("from", "").startswith(phone)
+                or (msg.get("from_phone") or "").startswith(phone)
+            )
+        }
+        jids.add(f"{phone}@s.whatsapp.net")
+        return [j for j in jids if j and not j.endswith("@g.us")]
+
+    async def get_chat_messages(
+        self, phone: str, limit: int = 50, before: str = ""
+    ) -> List[Dict[str, Any]]:
+        """Messages of one chat by phone, oldest-first, from the persisted
+        store (full history, not just the in-memory window). `before` (a
+        timestamp string) pages backwards through big chats."""
         if not self.is_connected:
             raise ConnectionError("WhatsApp is not connected")
 
-        jid_str = phone if "@" in phone else f"{phone}@s.whatsapp.net"
+        from app.core.message_history import message_history_db
+
+        jids = self._chat_jids_for_phone(phone)
+        records = await message_history_db.get_chat_multi(jids, limit, before)
+        if records or before:
+            return records
+        # Fallback for anything only present in the in-memory store.
         messages = [
             msg for msg in self._message_store
             if msg.get("chat_jid", "").startswith(phone)

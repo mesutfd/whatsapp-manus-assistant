@@ -187,16 +187,22 @@ class MessageHistoryDB:
         records.reverse()
         return records
 
-    async def get_chat_multi(self, chat_jids: List[str], limit: int = 50) -> List[Dict[str, Any]]:
+    async def get_chat_multi(
+        self, chat_jids: List[str], limit: int = 50, before: str = ""
+    ) -> List[Dict[str, Any]]:
         """Most recent messages across several JID forms of the same chat
         (phone-form, LID-form), oldest-first. Used to build LLM context, where
-        a chat's messages may be stored under either addressing form."""
+        a chat's messages may be stored under either addressing form.
+        `before` (a timestamp string) pages backwards through history."""
         jids = [j for j in chat_jids if j]
         if not jids:
             return []
         db = get_db()
+        query: Dict[str, Any] = {"chat_jid": {"$in": jids}}
+        if before:
+            query["timestamp"] = {"$lt": before}
         cursor = (
-            db.messages.find({"chat_jid": {"$in": jids}})
+            db.messages.find(query)
             .sort("timestamp", -1)
             .limit(limit)
         )

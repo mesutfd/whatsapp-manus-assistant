@@ -22,6 +22,7 @@ from app.models.schemas import (
     SendMessageResponse,
 )
 from app.services.allowed_contacts import allowed_contacts_service
+from app.utils.message_compact import compact_message
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/messages", tags=["Messages"])
@@ -226,33 +227,60 @@ async def get_conversation(
 
 @router.get("/chats")
 async def get_chats(
-    limit: int = Query(50, description="Maximum chats to return"),
+    limit: int = Query(30, ge=1, le=200, description="Maximum chats to return"),
+    messages_per_chat: int = Query(3, ge=0, le=20, description="Preview messages per chat"),
+    preview_chars: int = Query(300, ge=50, le=4000, description="Truncate preview message text to this many characters"),
     user: dict = Depends(get_current_user),
 ):
     """
-    Get all recent chats/conversations with last message preview.
+    Recent chats (newest activity first) with a small per-chat message
+    preview. Use /chat/{phone} with `before` paging for full history.
     """
     if not wa_client.is_connected:
         raise HTTPException(status_code=503, detail="WhatsApp is not connected")
 
-    chats = await wa_client.get_chats()
-    return {"chats": chats[:limit], "total": len(chats)}
+    chats = await wa_client.get_chats(messages_per_chat=messages_per_chat)
+    total = len(chats)
+    trimmed = []
+    for chat in chats[:limit]:
+        chat = dict(chat)
+        chat["last_message"] = (chat.get("last_message") or "")[:preview_chars]
+        chat["messages"] = [compact_message(m, preview_chars) for m in chat["messages"]]
+        trimmed.append(chat)
+    return {
+        "chats": trimmed,
+        "total": total,
+        "note": "Each chat carries only the last few messages as a truncated preview; "
+                "read full history per chat via GET /api/v1/messages/chat/{phone}.",
+    }
 
 
 @router.get("/chat/{phone}")
 async def get_chat_messages(
     phone: str,
-    limit: int = Query(50, description="Maximum messages to return"),
+    limit: int = Query(50, ge=1, le=200, description="Messages per page"),
+    before: str = Query("", description="Return messages older than this timestamp (for paging back through big chats)"),
+    max_chars: int = Query(1500, ge=0, le=20000, description="Truncate each message's text to this many characters (0 = no truncation)"),
     user: dict = Depends(get_current_user),
 ):
     """
-    Get messages from a specific chat by phone number.
+    Messages from a specific chat by phone number (oldest-first within the
+    page), from the persisted store. For big chats, page backwards by passing
+    `before` = the `oldest_timestamp` of the previous response.
     """
     if not wa_client.is_connected:
         raise HTTPException(status_code=503, detail="WhatsApp is not connected")
 
-    messages = await wa_client.get_chat_messages(phone, limit)
-    return {"phone": phone, "messages": messages, "count": len(messages)}
+    messages = await wa_client.get_chat_messages(phone, limit, before)
+    compacted = [compact_message(m, max_chars) for m in messages]
+    return {
+        "phone": phone,
+        "messages": compacted,
+        "count": len(compacted),
+        "has_more": len(messages) == limit,
+        "oldest_timestamp": messages[0].get("timestamp") if messages else None,
+        "note": "Pass before=<oldest_timestamp> to load the previous (older) page.",
+    }
 
 
 @router.post("/search")

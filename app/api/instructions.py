@@ -297,8 +297,16 @@ plus a SQLite store for persistence. From an agent's perspective:
      incoming, newest-first.
   • `POST /api/v1/smart/search` — content + fuzzy contact filter.
      Useful for "when did I last talk to Sarah about the meeting?"
-  • `GET /api/v1/messages/chat/{phone}` — full chat with one contact.
-  • `GET /api/v1/messages/chats` — all chats, last-message preview.
+  • `GET /api/v1/messages/chat/{phone}?limit=&before=&max_chars=` — one
+     chat's history from the persisted store (full depth, incl. imports),
+     oldest-first within the page. Big chats are paged: the response has
+     `has_more` and `oldest_timestamp`; pass `before=<oldest_timestamp>` to
+     load the previous (older) page. Long texts are truncated to
+     `max_chars` (default 1500) and flagged `text_truncated` — re-fetch
+     with a higher `max_chars` to read one in full.
+  • `GET /api/v1/messages/chats?limit=&messages_per_chat=&preview_chars=`
+     — recent chats, newest activity first, each with only a small
+     truncated message preview (kept compact on purpose).
   • `GET /api/v1/messages/history?limit=&offset=` — paginated full feed.
 
 The store is bounded; **don't rely on long-tail history**. If the user asks
