@@ -237,7 +237,8 @@ warn the user that delivery is unverified.
 ## 4. Contact resolution (fuzzy matching)
 
 The user thinks in names; WhatsApp speaks in JIDs (`<phone>@s.whatsapp.net`
-for people, `...@g.us` for groups). Bridge it like this:
+for people, `...@lid` for privacy-mode contacts, `...@g.us` for groups).
+Bridge it like this:
 
   • `POST /api/v1/smart/resolve` — best for ambiguous queries. Returns
     ranked matches with `match_score` (0–1).
@@ -251,6 +252,39 @@ for people, `...@g.us` for groups). Bridge it like this:
 If you get multiple matches with similar high scores, do NOT pick one
 silently. Show the top 2–3 and let the user choose. Sending to the wrong
 "Ali" is worse than asking one extra question.
+
+### 4.1 Where contact names actually come from — read this before assuming a search "should" work
+
+There is no live directory sync here. **This server has no way to pull the
+user's phone address book.** The "contacts" all four endpoints above search
+over are derived entirely from message history:
+
+  • Every sender's **self-declared WhatsApp push name** (e.g. "Mesut") —
+    captured live, on every incoming message, forever.
+  • For anyone whose conversation was brought in via a one-time iOS-backup
+    import, the **name that chat had saved in the backup** at import time
+    (which usually *is* the user's own phone-book name, e.g. "Masod Nayebi
+    Max Ideep") — but only for that imported slice of history, and only if
+    an import was ever run for that chat.
+
+Consequences that matter to you as an agent:
+
+  • A name the user knows a contact by (their own phone-book entry) may not
+    resolve at all if that person has only ever messaged over the *live*
+    link post-import — you'll only find their WhatsApp push name instead.
+    Don't conclude "this person doesn't exist here"; try the push name, a
+    phone number, or ask the user for one.
+  • `POST /api/v1/smart/search`'s `contact` field returns
+    `"contact_resolved": false` and an **empty** `results` list when the
+    name can't be matched — it does *not* fall back to searching every
+    chat. If you see `contact_resolved: false`, that IS the answer "no
+    match" — do not report the (empty) results as if scoped to that
+    person, and do not retry expecting a different unfiltered dump.
+  • When you already have a phone number for someone (from the user, from
+    a contacts app you have separate access to, from `resolvedRecipient`
+    on a prior call), skip name resolution entirely and use
+    `GET /api/v1/messages/chat/{phone}` or pass the digits as `contact` —
+    phone-number matching doesn't depend on any name ever having been seen.
 
 ---
 
@@ -572,6 +606,14 @@ STRUCTURED_SECTIONS: List[Dict[str, Any]] = [
             "0.5 ≤ score < 0.8: confirm with user.",
             "score < 0.5: ask user for more specifics.",
             "Multiple high-score matches: show top 2–3, let user choose.",
+            "There is no live phone-address-book sync. Names only come from "
+            "WhatsApp push names (seen live, forever) or from a one-time iOS "
+            "backup import (may carry the phone's real saved name, but only "
+            "for that imported chat).",
+            "/smart/search's contact_resolved:false + empty results means no "
+            "match, not 'not filtered' — never treat that as an unfiltered dump.",
+            "Already have a phone number? Skip name resolution and use "
+            "/messages/chat/{phone} or pass the digits as contact directly.",
         ],
     },
     {
