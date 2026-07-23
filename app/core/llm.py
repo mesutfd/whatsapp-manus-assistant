@@ -134,13 +134,21 @@ class LLMClient:
         temperature: float,
     ) -> str:
         url = f"{self.base_url.rstrip('/')}/messages"
+        # Anthropic requires strictly alternating roles — merge consecutive
+        # same-role turns (frequent in real chats: multi-message bursts).
         messages: List[Dict[str, str]] = []
-        for m in history:
+        for m in history + [{"role": "user", "content": user_message}]:
             role = m.get("role")
             content = (m.get("content") or "").strip()
-            if role in {"user", "assistant"} and content:
+            if role not in {"user", "assistant"} or not content:
+                continue
+            if messages and messages[-1]["role"] == role:
+                messages[-1]["content"] += f"\n{content}"
+            else:
                 messages.append({"role": role, "content": content})
-        messages.append({"role": "user", "content": user_message})
+        # A leading assistant turn is equally invalid — drop it.
+        if messages and messages[0]["role"] == "assistant":
+            messages.pop(0)
 
         payload = {
             "model": self.model,

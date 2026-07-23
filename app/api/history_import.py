@@ -11,8 +11,12 @@ message store so it shows up in /messages/history, /messages/chat/{phone},
 search, and LLM auto-reply context exactly like live messages.
 """
 
+import asyncio
 import logging
+import os
 import re
+import tempfile
+import zipfile
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -20,6 +24,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from app.core.auth import get_current_user
 from app.core.message_history import message_history_db
 from app.core.whatsapp_client import wa_client
+from app.services import backup_import, media_import
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/messages", tags=["Messages"])
@@ -182,4 +187,228 @@ async def import_history(
         "newly_inserted": inserted,
         "duplicates_skipped": len(records) - inserted,
         "message_store_size_after_reload": new_total,
+    }
+
+
+# ─── Restore from backup (auto-detecting) ────────────────────────────────────
+
+_INSERT_CHUNK = 2000
+# Media bundles (DB + all referenced photos/audio/documents) can be large.
+_MAX_UPLOAD_BYTES = 8 * 1024 * 1024 * 1024  # 8 GB
+
+
+async def _insert_chunked(records: List[Dict[str, Any]]) -> int:
+    inserted = 0
+    for i in range(0, len(records), _INSERT_CHUNK):
+        inserted += await message_history_db.insert_many(
+            records[i : i + _INSERT_CHUNK], source="import"
+        )
+    return inserted
+
+
+def _contact_name_lookup() -> Dict[str, str]:
+    """jid -> display name, from the live contacts cache (best effort)."""
+    cache = getattr(wa_client, "_contacts_cache", None) or {}
+    lookup: Dict[str, str] = {}
+    for jid, info in cache.items():
+        name = (info or {}).get("name")
+        if name and name != "Unknown":
+            lookup[jid] = name
+    return lookup
+
+
+async def _read_upload_to_temp(file: UploadFile, suffix: str) -> str:
+    """Stream the upload to a temp file (SQLite needs a real path)."""
+    fd, path = tempfile.mkstemp(suffix=suffix, prefix="wa-backup-")
+    size = 0
+    try:
+        with os.fdopen(fd, "wb") as out:
+            while True:
+                chunk = await file.read(4 * 1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > _MAX_UPLOAD_BYTES:
+                    raise HTTPException(status_code=413, detail="Backup file too large")
+                out.write(chunk)
+        return path
+    except Exception:
+        os.unlink(path)
+        raise
+
+
+def _find_sqlite_in_zip(zip_path: str) -> Optional[str]:
+    """Return the entry name of a WhatsApp sqlite DB inside a bundle zip
+    (ChatStorage*.sqlite / msgstore*.db at any depth), or None."""
+    with zipfile.ZipFile(zip_path) as archive:
+        for name in archive.namelist():
+            base = name.rsplit("/", 1)[-1].lower()
+            if re.fullmatch(r"chatstorage.*\.sqlite|msgstore.*\.db", base):
+                return name
+    return None
+
+
+def _extract_zip_entry_to_temp(zip_path: str, entry: str, suffix: str) -> str:
+    fd, path = tempfile.mkstemp(suffix=suffix, prefix="wa-bundle-db-")
+    with os.fdopen(fd, "wb") as out, zipfile.ZipFile(zip_path) as archive:
+        with archive.open(entry) as src:
+            while True:
+                chunk = src.read(4 * 1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+    return path
+
+
+@router.post("/import-backup")
+async def import_backup(
+    file: UploadFile = File(..., description="WhatsApp backup: chat export .txt, export .zip, decrypted msgstore.db, iOS ChatStorage.sqlite, or a media bundle .zip (DB + media files)"),
+    phone: str = Form("", description="Optional: other participant's phone (single-chat .txt/.zip only)"),
+    other_name: str = Form("", description="Optional: other participant's name as it appears in the export (single-chat .txt/.zip only)"),
+    include_videos: bool = Form(False, description="Media bundles: also store full video originals (large)"),
+    user: dict = Depends(get_current_user),
+):
+    """
+    **Restore previous chats from a WhatsApp backup.** Upload one file and the
+    type is auto-detected:
+
+    - `.txt` — a single "Export chat" transcript (per-chat backup)
+    - `.zip` — a per-chat export with media, or an archive bundling many
+      exported `.txt` transcripts (only the transcripts are imported)
+    - **decrypted** Android `msgstore.db` (full backup — all chats)
+    - iOS `ChatStorage.sqlite` from an iPhone backup (full backup — all chats)
+    - **media bundle** `.zip` — a ChatStorage/msgstore DB plus the actual
+      media files (see scripts/export_ios_backup_bundle.py). Messages AND
+      media are imported: originals into GridFS, plus small thumbnails for
+      images.
+
+    Encrypted `.crypt12/.crypt14/.crypt15` files are rejected: decrypt them
+    first with your 64-digit backup key (e.g. the `wa-crypt-tools` project).
+
+    Everything is written to the persisted message store, so restored chats
+    appear in history, search, and LLM auto-reply context like live messages.
+    Re-uploading the same backup is safe — duplicates are skipped.
+    """
+    filename = (file.filename or "backup").strip()
+    lower = filename.lower()
+
+    if lower.endswith(backup_import.CRYPT_EXTENSIONS):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This is an ENCRYPTED WhatsApp backup. It must be decrypted with "
+                "your 64-digit backup key before it can be imported (see the "
+                "'wa-crypt-tools' project: wadecrypt key msgstore.db.crypt15 "
+                "msgstore.db), then upload the resulting msgstore.db here."
+            ),
+        )
+
+    head = await file.read(16)
+    await file.seek(0)
+
+    tmp_path: Optional[str] = None
+    db_tmp_path: Optional[str] = None
+    try:
+        # ── Full backups: SQLite databases ──────────────────────────────
+        if head.startswith(backup_import.SQLITE_MAGIC):
+            tmp_path = await _read_upload_to_temp(file, suffix=".db")
+            kind = await asyncio.to_thread(backup_import.sniff_sqlite_kind, tmp_path)
+            if kind is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "This SQLite database doesn't look like a WhatsApp message "
+                        "store (expected msgstore.db or ChatStorage.sqlite)."
+                    ),
+                )
+            names = _contact_name_lookup()
+            parser = (
+                backup_import.parse_ios_chatstorage
+                if kind == "ios_sqlite"
+                else backup_import.parse_android_msgstore
+            )
+            records, summary = await asyncio.to_thread(parser, tmp_path, names)
+
+        # ── ZIP: media bundle, per-chat export, or bundle of .txt exports ─
+        elif head.startswith(b"PK"):
+            tmp_path = await _read_upload_to_temp(file, suffix=".zip")
+            try:
+                db_entry = await asyncio.to_thread(_find_sqlite_in_zip, tmp_path)
+            except zipfile.BadZipFile:
+                raise HTTPException(status_code=400, detail="Corrupt or unreadable .zip file")
+
+            if db_entry:
+                # Bundle: sqlite DB + media files at their local-path names.
+                db_tmp_path = await asyncio.to_thread(
+                    _extract_zip_entry_to_temp, tmp_path, db_entry, ".db"
+                )
+                kind = await asyncio.to_thread(backup_import.sniff_sqlite_kind, db_tmp_path)
+                if kind is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="The database inside this zip isn't a WhatsApp message store.",
+                    )
+                names = _contact_name_lookup()
+                parser = (
+                    backup_import.parse_ios_chatstorage
+                    if kind == "ios_sqlite"
+                    else backup_import.parse_android_msgstore
+                )
+                records, summary = await asyncio.to_thread(parser, db_tmp_path, names)
+                media_stats = await media_import.attach_media_from_zip(
+                    records, tmp_path, include_videos=include_videos
+                )
+                summary = {**summary, "kind": f"{kind}_bundle", **media_stats}
+            else:
+                with open(tmp_path, "rb") as fh:
+                    raw = fh.read()
+                try:
+                    records, summary = backup_import.parse_zip_backup(
+                        raw, filename, phone or None, other_name or None
+                    )
+                except zipfile.BadZipFile:
+                    raise HTTPException(status_code=400, detail="Corrupt or unreadable .zip file")
+
+        # ── Plain text: single chat export ──────────────────────────────
+        else:
+            raw = await file.read()
+            if len(raw) > 200 * 1024 * 1024:
+                raise HTTPException(status_code=413, detail="Text export too large")
+            text = raw.decode("utf-8", errors="replace")
+            entries = backup_import.parse_txt_transcript(text)
+            subject = (other_name or "").strip() or backup_import.subject_from_filename(filename)
+            records = backup_import.records_from_transcript(
+                entries, subject, owner_name=None, phone=phone or None
+            )
+            summary = {"kind": "txt", "chats": 1 if records else 0}
+    finally:
+        for path in (tmp_path, db_tmp_path):
+            if path:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+
+    if not records:
+        return {
+            "success": False,
+            "error": "no_messages_parsed",
+            "message": (
+                "No messages could be read from that file. Supported: WhatsApp "
+                "'Export chat' .txt/.zip, decrypted Android msgstore.db, or iOS "
+                "ChatStorage.sqlite."
+            ),
+            **summary,
+        }
+
+    inserted = await _insert_chunked(records)
+    new_total = await wa_client.reload_message_store()
+
+    return {
+        "success": True,
+        "parsed_messages": len(records),
+        "newly_inserted": inserted,
+        "duplicates_skipped": len(records) - inserted,
+        "message_store_size_after_reload": new_total,
+        **summary,
     }

@@ -112,7 +112,7 @@ class Settings(BaseSettings):
     )
     LLM_MAX_TOKENS: int = 300
     LLM_TEMPERATURE: float = 0.7
-    LLM_HISTORY_SIZE: int = 8  # how many recent messages from this chat to include
+    LLM_HISTORY_SIZE: int = 25  # how many recent messages from this chat to include
     LLM_TIMEOUT_SECONDS: float = 20.0
 
     # Scheduler

@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>iDeep WhatsApp Bot — Control Panel</title>
-    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="/static/css/style.css?v=1.3.0">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 </head>
@@ -150,10 +150,76 @@
 
                 <div class="panel mt-2">
                     <div class="panel-header">
-                        <h3>Recent Messages</h3>
-                        <button class="btn btn-sm btn-outline" id="refreshMessages">Refresh</button>
+                        <h3>Conversations</h3>
+                        <button class="btn btn-sm btn-outline" id="refreshConversations">Refresh</button>
                     </div>
-                    <div class="message-list" id="messageList"></div>
+                    <div class="chat-layout">
+                        <aside class="chat-sidebar">
+                            <input type="text" id="convFilter" class="conv-filter" placeholder="Filter chats...">
+                            <div class="conv-list" id="convList">
+                                <div class="empty-state">Loading conversations…</div>
+                            </div>
+                        </aside>
+                        <section class="chat-main">
+                            <div class="chat-main-header" id="convHeader">
+                                <span class="muted">Select a conversation</span>
+                            </div>
+                            <div class="chat-messages" id="convMessages">
+                                <div class="chat-empty">
+                                    <span>&#128172;</span>
+                                    <p>Pick a chat on the left to view the conversation.</p>
+                                </div>
+                            </div>
+                            <div class="attach-chip" id="convAttachChip" style="display:none;">
+                                <span class="attach-chip-icon">&#128206;</span>
+                                <span class="attach-chip-name" id="convAttachName"></span>
+                                <button type="button" class="attach-chip-clear" id="convAttachClear" title="Remove attachment">&times;</button>
+                            </div>
+                            <form class="chat-send-row" id="convSendForm" style="display:none;">
+                                <button type="button" class="btn btn-outline attach-btn" id="convAttachBtn" title="Attach a photo, video, audio, or document">&#128206;</button>
+                                <input type="file" id="convAttachInput" style="display:none;">
+                                <input type="text" id="convSendText" placeholder="Type a message..." autocomplete="off">
+                                <button type="submit" class="btn btn-primary">Send</button>
+                            </form>
+                        </section>
+                    </div>
+                </div>
+
+                <div class="panel mt-2">
+                    <div class="panel-header"><h3>Restore Chats from Backup</h3></div>
+                    <p class="panel-subtitle">
+                        Bring old conversations into the message store so they show up in history,
+                        search, and the assistant's context. Supported files (auto-detected):
+                    </p>
+                    <ul class="backup-supported-list">
+                        <li><strong>Per-chat backup</strong> — a WhatsApp "Export chat" <code>.txt</code> file, or the <code>.zip</code> it comes in (Chat &gt; ⋮ &gt; More &gt; Export chat)</li>
+                        <li><strong>Full backup</strong> — a <em>decrypted</em> Android <code>msgstore.db</code>, an iOS <code>ChatStorage.sqlite</code>, or a <code>.zip</code> bundling many exported chats</li>
+                        <li><strong>Media bundle</strong> — a <code>.zip</code> with the DB <em>plus</em> the actual media files (build it with <code>scripts/export_ios_backup_bundle.py</code>); photos, voice notes, stickers and documents are imported with thumbnails</li>
+                    </ul>
+                    <p class="field-hint">
+                        Encrypted <code>.crypt14/.crypt15</code> files must be decrypted with your
+                        64-digit backup key first (e.g. with <code>wa-crypt-tools</code>).
+                        Re-uploading the same backup is safe — duplicates are skipped.
+                    </p>
+                    <form id="backupImportForm" class="mt-2">
+                        <div class="form-group">
+                            <label>Backup file</label>
+                            <input type="file" id="backupFile" accept=".txt,.zip,.db,.sqlite,.sqlite3,.crypt12,.crypt14,.crypt15">
+                        </div>
+                        <div class="form-row" id="backupChatFields">
+                            <div class="form-group" style="flex:1; margin:0;">
+                                <label>Contact phone (optional, single-chat exports)</label>
+                                <input type="text" id="backupPhone" placeholder="989123456789">
+                            </div>
+                            <div class="form-group" style="flex:1; margin:0;">
+                                <label>Contact name as shown in the export (optional)</label>
+                                <input type="text" id="backupOtherName" placeholder="John Doe">
+                            </div>
+                        </div>
+                        <p class="field-hint">For a single-chat <code>.txt</code>/<code>.zip</code>, filling these links the restored chat to the real phone number. Full backups already contain phone numbers.</p>
+                        <button type="submit" class="btn btn-primary mt-1" id="backupImportBtn">Restore Backup</button>
+                    </form>
+                    <div id="backupImportResult" class="backup-result" style="display:none;"></div>
                 </div>
             </div>
 
@@ -242,6 +308,52 @@
                                     <input type="checkbox" id="quietDefer" checked>
                                     <span class="toggle-slider"></span>
                                 </label>
+                            </div>
+                        </div>
+
+                        <!-- Human handover & owner commands -->
+                        <div class="subpanel">
+                            <div class="subpanel-title">Human handover &amp; commands</div>
+                            <p class="field-hint" style="margin-bottom:10px;">
+                                The bot waits before replying and backs off when you handle a chat
+                                yourself. Control it from WhatsApp with your own messages:
+                                <code>#mute</code> / <code>#unmute</code> inside a chat,
+                                <code>#bot off</code>, <code>#bot off 2h</code>, <code>#bot on</code>,
+                                <code>#status</code> anywhere — or bare codes
+                                (<code>off</code>, <code>on</code>, <code>status</code>) in the control chat.
+                                Only messages sent by you are ever treated as commands.
+                            </p>
+                            <div class="form-row">
+                                <div class="form-group" style="margin:0;">
+                                    <label>Reply delay (seconds)</label>
+                                    <input type="number" id="replyDelaySeconds" min="0" value="60">
+                                    <p class="field-hint">Cancelled if you reply first. 0 = immediate.</p>
+                                </div>
+                                <div class="form-group" style="margin:0;">
+                                    <label>Back off after I reply (minutes)</label>
+                                    <input type="number" id="humanSnoozeMinutes" min="0" value="30">
+                                    <p class="field-hint">Bot stays out of a chat you replied in.</p>
+                                </div>
+                                <div class="form-group" style="margin:0;">
+                                    <label>Hold after I read (minutes)</label>
+                                    <input type="number" id="readHoldMinutes" min="0" value="5">
+                                    <p class="field-hint">Extra wait when you open the chat on your phone.</p>
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group" style="margin:0;">
+                                    <label>Command prefix</label>
+                                    <input type="text" id="commandPrefix" value="#" maxlength="3">
+                                </div>
+                                <div class="form-group" style="margin:0;">
+                                    <label>Control chat (phone, optional)</label>
+                                    <input type="text" id="controlContact" placeholder="989121234567">
+                                    <p class="field-hint">Bare codes work in this chat, no prefix needed.</p>
+                                </div>
+                            </div>
+                            <div class="form-group" style="margin-bottom:0;">
+                                <label>Muted chats</label>
+                                <div id="mutedChatsList" class="list-block"></div>
                             </div>
                         </div>
 
@@ -535,6 +647,6 @@ Body: {"phone": "989...", "message": "Hi, Alireza will contact you soon."}</pre>
         <div class="toast-container" id="toastContainer"></div>
     </div>
 
-    <script src="/static/js/app.js"></script>
+    <script src="/static/js/app.js?v=1.3.0"></script>
 </body>
 </html>

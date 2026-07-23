@@ -10,6 +10,13 @@ class IDeepApp {
         this.pollInterval = null;
         this.statusInterval = null;
         this.scheduleInterval = null;
+        this.conversations = [];
+        this.activeConv = null;
+        this.convMessages = [];
+        this.convHasMore = false;
+        this.convInterval = null;
+        this.mediaCache = new Map();   // GridFS file id -> object URL
+        this.pendingAttachment = null;
 
         this.init();
     }
@@ -30,6 +37,22 @@ class IDeepApp {
         if (body !== null) options.body = JSON.stringify(body);
 
         const response = await fetch(`${this.baseUrl}${path}`, options);
+        let data = null;
+        try { data = await response.json(); } catch (_) {}
+        if (!response.ok) {
+            const detail = (data && data.detail) || `HTTP ${response.status}`;
+            if (response.status === 401) this.showLogin();
+            throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+        }
+        return data;
+    }
+
+    async apiUpload(path, formData) {
+        const response = await fetch(`${this.baseUrl}${path}`, {
+            method: 'POST',
+            headers: { 'X-API-Key': this.apiKey },  // no Content-Type: browser sets multipart boundary
+            body: formData,
+        });
         let data = null;
         try { data = await response.json(); } catch (_) {}
         if (!response.ok) {
@@ -192,7 +215,7 @@ class IDeepApp {
         this.statusInterval = setInterval(() => this.pollStatus(), 5000);
     }
     stopStatusPolling()  { if (this.statusInterval) { clearInterval(this.statusInterval); this.statusInterval = null; } }
-    stopPolling()        { this.stopQRPolling(); this.stopStatusPolling(); if (this.scheduleInterval) clearInterval(this.scheduleInterval); }
+    stopPolling()        { this.stopQRPolling(); this.stopStatusPolling(); this.stopConvPolling(); if (this.scheduleInterval) clearInterval(this.scheduleInterval); }
 
     async pollStatus() {
         try {
@@ -290,11 +313,418 @@ class IDeepApp {
         }
     }
 
-    async loadRecentMessages() {
+    // ─── Conversation view ──────────────────────────────────────────────
+
+    async loadConversations() {
         try {
-            const data = await this.api('GET', '/api/v1/messages/history?limit=50');
-            this.renderMessages(data.messages, 'messageList');
+            const data = await this.api('GET', '/api/v1/messages/conversations?limit=500');
+            this.conversations = data.conversations || [];
+            this.renderConvList();
+        } catch (e) {
+            document.getElementById('convList').innerHTML =
+                `<div class="empty-state">Failed to load: ${this.escapeHtml(e.message)}</div>`;
+        }
+    }
+
+    renderConvList() {
+        const container = document.getElementById('convList');
+        const filter = (document.getElementById('convFilter').value || '').toLowerCase();
+        const items = (this.conversations || []).filter(c =>
+            !filter ||
+            (c.name || '').toLowerCase().includes(filter) ||
+            (c.phone || '').includes(filter)
+        );
+        if (!items.length) {
+            container.innerHTML = '<div class="empty-state">No conversations.</div>';
+            return;
+        }
+        container.innerHTML = items.map(c => {
+            const preview = c.last_text
+                ? this.escapeHtml(c.last_text.split('\n')[0].slice(0, 60))
+                : `<em>${this.mediaLabel(c.last_type)}</em>`;
+            const youPrefix = c.last_from_me ? '<span class="muted">You: </span>' : '';
+            const active = this.activeConv && this.activeConv.chat_jid === c.chat_jid ? ' active' : '';
+            const initial = this.escapeHtml((c.name || '?').trim().charAt(0).toUpperCase() || '?');
+            return `
+                <div class="conv-item${active}" data-jid="${this.escapeHtml(c.chat_jid)}">
+                    <div class="conv-avatar${c.is_group ? ' group' : ''}">${c.is_group ? '&#128101;' : initial}</div>
+                    <div class="conv-body">
+                        <div class="conv-top">
+                            <span class="conv-name" dir="auto">${this.escapeHtml(c.name || c.chat_jid)}</span>
+                            <span class="conv-time">${this.fmtShortTime(c.last_timestamp)}</span>
+                        </div>
+                        <div class="conv-preview" dir="auto">${youPrefix}${preview}</div>
+                    </div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    fmtShortTime(ts) {
+        if (!ts) return '';
+        const d = new Date(ts);
+        if (isNaN(d.getTime())) return '';
+        const now = new Date();
+        if (d.toDateString() === now.toDateString()) {
+            return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        }
+        if (d.getFullYear() === now.getFullYear()) {
+            return d.toLocaleDateString([], { day: 'numeric', month: 'short' });
+        }
+        return d.toLocaleDateString([], { day: '2-digit', month: '2-digit', year: '2-digit' });
+    }
+
+    async openConversation(jid) {
+        const conv = (this.conversations || []).find(c => c.chat_jid === jid);
+        this.activeConv = conv || { chat_jid: jid, name: jid, phone: null, is_group: false };
+        this.renderConvList();
+
+        const header = document.getElementById('convHeader');
+        const sub = this.activeConv.is_group
+            ? 'group'
+            : (this.activeConv.phone || this.activeConv.chat_jid);
+        header.innerHTML = `
+            <div class="conv-avatar${this.activeConv.is_group ? ' group' : ''}">${this.activeConv.is_group ? '&#128101;' : this.escapeHtml((this.activeConv.name || '?').charAt(0).toUpperCase())}</div>
+            <div>
+                <div class="conv-name" dir="auto">${this.escapeHtml(this.activeConv.name || jid)}</div>
+                <div class="conv-sub">${this.escapeHtml(sub)} · ${this.activeConv.message_count || 0} messages</div>
+            </div>
+        `;
+
+        // Reply box only for real 1:1 phone chats
+        const canSend = !!this.activeConv.phone && !this.activeConv.is_group;
+        document.getElementById('convSendForm').style.display = canSend ? 'flex' : 'none';
+
+        try {
+            const data = await this.api('GET',
+                `/api/v1/messages/conversation?chat_jid=${encodeURIComponent(jid)}&limit=60`);
+            this.convMessages = data.messages || [];
+            this.convHasMore = !!data.has_more;
+            this.renderConversation(true);
+        } catch (e) {
+            document.getElementById('convMessages').innerHTML =
+                `<div class="chat-empty"><p>${this.escapeHtml(e.message)}</p></div>`;
+        }
+        this.startConvPolling();
+    }
+
+    async loadOlderMessages() {
+        if (!this.activeConv || !this.convMessages.length) return;
+        const box = document.getElementById('convMessages');
+        const prevHeight = box.scrollHeight;
+        try {
+            const before = this.convMessages[0].timestamp;
+            const data = await this.api('GET',
+                `/api/v1/messages/conversation?chat_jid=${encodeURIComponent(this.activeConv.chat_jid)}&limit=60&before=${encodeURIComponent(before)}`);
+            this.convMessages = (data.messages || []).concat(this.convMessages);
+            this.convHasMore = !!data.has_more;
+            this.renderConversation(false);
+            box.scrollTop = box.scrollHeight - prevHeight;  // keep viewport anchored
+        } catch (e) {
+            this.toast(`Load older failed: ${e.message}`, 'error');
+        }
+    }
+
+    renderConversation(scrollToBottom) {
+        const box = document.getElementById('convMessages');
+        const msgs = this.convMessages || [];
+        if (!msgs.length) {
+            box.innerHTML = '<div class="chat-empty"><p>No messages in this chat yet.</p></div>';
+            return;
+        }
+        const parts = [];
+        if (this.convHasMore) {
+            parts.push('<div class="load-older"><button class="btn btn-sm btn-outline" id="loadOlderBtn">Load older messages</button></div>');
+        }
+        let lastDay = '';
+        for (let i = 0; i < msgs.length; i++) {
+            const m = msgs[i];
+            const d = m.timestamp ? new Date(m.timestamp) : null;
+            const day = d && !isNaN(d.getTime()) ? d.toDateString() : '';
+            if (day && day !== lastDay) {
+                lastDay = day;
+                parts.push(`<div class="day-divider"><span>${d.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })}</span></div>`);
+            }
+            const sent = !!m.is_from_me;
+            const time = d && !isNaN(d.getTime())
+                ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+            const senderLine = (!sent && m.is_group)
+                ? `<div class="bubble-sender" dir="auto">${this.escapeHtml(m.sender_name || m.from_phone || '')}</div>` : '';
+            const mediaHtml = this.mediaBubbleHtml(m, i);
+            const textHtml = m.text
+                ? `<div class="bubble-text" dir="auto">${this.escapeHtml(m.text)}</div>` : '';
+            const body = (mediaHtml + textHtml)
+                || '<div class="bubble-text media" dir="auto">&#128247; Media</div>';
+            parts.push(`
+                <div class="bubble-row ${sent ? 'sent' : 'received'}">
+                    <div class="bubble${mediaHtml ? ' has-media' : ''}">
+                        ${senderLine}
+                        ${body}
+                        <div class="bubble-time">${time}</div>
+                    </div>
+                </div>
+            `);
+        }
+        box.innerHTML = parts.join('');
+        const olderBtn = document.getElementById('loadOlderBtn');
+        if (olderBtn) olderBtn.addEventListener('click', () => this.loadOlderMessages());
+        if (scrollToBottom) box.scrollTop = box.scrollHeight;
+        this.hydrateMedia(box);
+    }
+
+    // ─── Media rendering ────────────────────────────────────────────────
+
+    mediaLabel(kind) {
+        return {
+            image: '&#128247; Photo', video: '&#127916; Video', gif: '&#127902; GIF',
+            sticker: '&#127912; Sticker', voice: '&#127908; Voice message',
+            audio: '&#127925; Audio', document: '&#128196; Document',
+            contact: '&#128100; Contact', location: '&#128205; Location',
+        }[kind] || '&#128247; Media';
+    }
+
+    fmtDuration(secs) {
+        if (!secs) return '';
+        const s = Math.round(secs);
+        return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+    }
+
+    fmtSize(bytes) {
+        if (!bytes) return '';
+        if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(1)} MB`;
+        return `${Math.max(1, Math.round(bytes / 1e3))} KB`;
+    }
+
+    /** Build the media part of a chat bubble. `i` indexes this.convMessages
+     *  so click handlers can look the media back up. */
+    mediaBubbleHtml(m, i) {
+        const media = m.media;
+        const kind = (media && media.kind) || (m.type && m.type !== 'text' ? m.type : null);
+        if (!kind) return '';
+        if (!media) {
+            // Old records (pre-media import) have only type='media'.
+            return kind === 'text' ? '' :
+                `<div class="media-chip inert">${this.mediaLabel(kind)}</div>`;
+        }
+
+        const dur = this.fmtDuration(media.duration);
+        switch (kind) {
+            case 'image':
+            case 'sticker': {
+                const thumbId = media.thumb_id || media.file_id;
+                if (!thumbId) return `<div class="media-chip inert">${this.mediaLabel(kind)}</div>`;
+                const cls = kind === 'sticker' ? 'media-frame sticker' : 'media-frame';
+                const click = media.file_id ? ` data-action="lightbox" data-mi="${i}"` : '';
+                return `<div class="${cls}"${click}><img class="media-img" data-thumb="${thumbId}" alt="${kind}"></div>`;
+            }
+            case 'video':
+            case 'gif': {
+                const badge = `<span class="media-play">&#9654;</span>` +
+                              (dur ? `<span class="media-duration">${dur}</span>` : '');
+                if (media.thumb_id) {
+                    const click = media.file_id ? ` data-action="lightbox" data-mi="${i}"` : '';
+                    return `<div class="media-frame video"${click}><img class="media-img" data-thumb="${media.thumb_id}" alt="video">${badge}</div>`;
+                }
+                if (media.file_id) {
+                    return `<div class="media-frame video empty" data-action="lightbox" data-mi="${i}">${badge}</div>`;
+                }
+                return `<div class="media-chip inert">${this.mediaLabel(kind)}${dur ? ` · ${dur}` : ''}<span class="media-note">not in backup</span></div>`;
+            }
+            case 'voice':
+            case 'audio': {
+                if (media.file_id) {
+                    return `<div class="media-audio"><span class="media-audio-label">${this.mediaLabel(kind)}</span><audio controls preload="none" data-audio="${media.file_id}"></audio></div>`;
+                }
+                return `<div class="media-chip inert">${this.mediaLabel(kind)}${dur ? ` · ${dur}` : ''}</div>`;
+            }
+            case 'document': {
+                const name = this.escapeHtml(media.filename || 'Document');
+                const size = this.fmtSize(media.size);
+                if (media.file_id) {
+                    return `<div class="media-chip clickable" data-action="download" data-mi="${i}">&#128196; ${name}${size ? `<span class="media-note">${size}</span>` : ''}</div>`;
+                }
+                return `<div class="media-chip inert">&#128196; ${name}<span class="media-note">not in backup</span></div>`;
+            }
+            case 'contact': {
+                const name = this.escapeHtml(media.contact_name || 'Contact');
+                const click = media.vcard ? ` data-action="vcard" data-mi="${i}"` : '';
+                return `<div class="media-chip${media.vcard ? ' clickable' : ' inert'}"${click}>&#128100; ${name}${media.vcard ? '<span class="media-note">save .vcf</span>' : ''}</div>`;
+            }
+            case 'location': {
+                const label = this.escapeHtml(media.location_name || media.address || 'Location');
+                if (media.latitude || media.longitude) {
+                    const url = `https://www.google.com/maps?q=${media.latitude},${media.longitude}`;
+                    return `<a class="media-chip clickable" href="${url}" target="_blank" rel="noopener">&#128205; ${label}<span class="media-note">open map</span></a>`;
+                }
+                return `<div class="media-chip inert">&#128205; ${label}</div>`;
+            }
+            default:
+                return `<div class="media-chip inert">${this.mediaLabel(kind)}</div>`;
+        }
+    }
+
+    async fetchMediaBlob(fileId) {
+        if (this.mediaCache.has(fileId)) return this.mediaCache.get(fileId);
+        const response = await fetch(`${this.baseUrl}/api/v1/media/${fileId}`, {
+            headers: { 'X-API-Key': this.apiKey },
+        });
+        if (!response.ok) throw new Error(`media HTTP ${response.status}`);
+        const url = URL.createObjectURL(await response.blob());
+        this.mediaCache.set(fileId, url);
+        return url;
+    }
+
+    /** Fill in thumbnails and audio players after (re)rendering a chat. */
+    hydrateMedia(box) {
+        box.querySelectorAll('img.media-img[data-thumb]').forEach(async (img) => {
+            const id = img.dataset.thumb;
+            delete img.dataset.thumb;
+            try {
+                img.src = await this.fetchMediaBlob(id);
+                img.closest('.media-frame')?.classList.add('loaded');
+            } catch { img.closest('.media-frame')?.classList.add('failed'); }
+        });
+        box.querySelectorAll('audio[data-audio]').forEach(async (audio) => {
+            const id = audio.dataset.audio;
+            delete audio.dataset.audio;
+            try { audio.src = await this.fetchMediaBlob(id); } catch {}
+        });
+    }
+
+    async onConvMediaClick(e) {
+        const el = e.target.closest('[data-action]');
+        if (!el || !el.dataset.mi) return;
+        const m = (this.convMessages || [])[parseInt(el.dataset.mi, 10)];
+        const media = m && m.media;
+        if (!media) return;
+        try {
+            if (el.dataset.action === 'lightbox') {
+                await this.openLightbox(media);
+            } else if (el.dataset.action === 'download') {
+                const url = await this.fetchMediaBlob(media.file_id);
+                this.triggerDownload(url, media.filename || 'document');
+            } else if (el.dataset.action === 'vcard') {
+                const blob = new Blob([media.vcard], { type: 'text/vcard' });
+                this.triggerDownload(URL.createObjectURL(blob), `${media.contact_name || 'contact'}.vcf`);
+            }
+        } catch (err) {
+            this.toast(`Media failed to load: ${err.message}`, 'error');
+        }
+    }
+
+    triggerDownload(url, filename) {
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+    }
+
+    async openLightbox(media) {
+        const overlay = document.createElement('div');
+        overlay.className = 'lightbox-overlay';
+        overlay.innerHTML = '<div class="lightbox-loading">Loading…</div>';
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay || e.target.classList.contains('lightbox-close')) overlay.remove();
+        });
+        document.body.appendChild(overlay);
+        try {
+            const url = await this.fetchMediaBlob(media.file_id);
+            const isVideo = media.kind === 'video' || media.kind === 'gif';
+            overlay.innerHTML = `
+                <button class="lightbox-close" title="Close">&times;</button>
+                ${isVideo
+                    ? `<video class="lightbox-content" src="${url}" controls autoplay></video>`
+                    : `<img class="lightbox-content" src="${url}" alt="media">`}
+            `;
+            overlay.addEventListener('click', (e) => {
+                if (e.target === overlay || e.target.classList.contains('lightbox-close')) overlay.remove();
+            });
+        } catch (err) {
+            overlay.remove();
+            this.toast(`Media failed to load: ${err.message}`, 'error');
+        }
+    }
+
+    // ─── Composer attachments ───────────────────────────────────────────
+
+    setAttachment(file) {
+        this.pendingAttachment = file || null;
+        const chip = document.getElementById('convAttachChip');
+        if (!chip) return;
+        if (file) {
+            document.getElementById('convAttachName').textContent =
+                `${file.name} (${this.fmtSize(file.size) || '0 KB'})`;
+            chip.style.display = 'inline-flex';
+        } else {
+            chip.style.display = 'none';
+            const input = document.getElementById('convAttachInput');
+            if (input) input.value = '';
+        }
+    }
+
+    async sendConvMessage() {
+        const input = document.getElementById('convSendText');
+        const text = input.value.trim();
+        const attachment = this.pendingAttachment;
+        if ((!text && !attachment) || !this.activeConv || !this.activeConv.phone) return;
+        try {
+            let res;
+            if (attachment) {
+                const fd = new FormData();
+                fd.append('phone', this.activeConv.phone);
+                fd.append('file', attachment);
+                fd.append('caption', text);
+                res = await this.apiUpload('/api/v1/messages/send-media', fd);
+            } else {
+                res = await this.api('POST', '/api/v1/messages/send', {
+                    phone: this.activeConv.phone, message: text,
+                });
+            }
+            if (res.success) {
+                input.value = '';
+                this.setAttachment(null);
+                await this.refreshActiveConversation(true);
+                this.loadConversations();
+            } else {
+                this.toast(`Send failed: ${res.error}`, 'error');
+            }
+        } catch (e) {
+            this.toast(`Send failed: ${e.message}`, 'error');
+        }
+    }
+
+    async refreshActiveConversation(forceScroll = false) {
+        if (!this.activeConv) return;
+        const box = document.getElementById('convMessages');
+        try {
+            const data = await this.api('GET',
+                `/api/v1/messages/conversation?chat_jid=${encodeURIComponent(this.activeConv.chat_jid)}&limit=60`);
+            const fresh = data.messages || [];
+            const last = (arr) => arr.length ? `${arr[arr.length - 1].id}|${arr[arr.length - 1].timestamp}` : '';
+            if (last(fresh) === last(this.convMessages || []) && fresh.length === (this.convMessages || []).length) {
+                return;  // nothing new
+            }
+            const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+            const prevScroll = box.scrollTop;
+            this.convMessages = fresh;
+            this.convHasMore = !!data.has_more;
+            this.renderConversation(forceScroll || nearBottom);
+            if (!forceScroll && !nearBottom) box.scrollTop = prevScroll;
         } catch {}
+    }
+
+    startConvPolling() {
+        this.stopConvPolling();
+        this.convInterval = setInterval(() => {
+            const tabActive = document.getElementById('tab-messages').classList.contains('active');
+            if (tabActive && this.activeConv) this.refreshActiveConversation();
+        }, 8000);
+    }
+
+    stopConvPolling() {
+        if (this.convInterval) { clearInterval(this.convInterval); this.convInterval = null; }
     }
 
     renderMessages(messages, containerId) {
@@ -306,10 +736,75 @@ class IDeepApp {
         container.innerHTML = messages.map(msg => `
             <div class="message-item">
                 <div class="message-sender">${this.escapeHtml(msg.sender_name || msg.from || 'Unknown')}</div>
-                <div class="message-text">${this.escapeHtml(msg.text || '[Media]')}</div>
+                <div class="message-text">${msg.text ? this.escapeHtml(msg.text) : `<em>${this.mediaLabel(msg.type)}</em>`}</div>
                 <div class="message-time">${msg.timestamp ? new Date(msg.timestamp).toLocaleString() : ''}</div>
             </div>
         `).join('');
+    }
+
+    // ─── Restore from backup ────────────────────────────────────────────
+
+    async importBackup() {
+        const fileInput = document.getElementById('backupFile');
+        const file = fileInput.files && fileInput.files[0];
+        if (!file) { this.toast('Choose a backup file first', 'error'); return; }
+
+        const btn = document.getElementById('backupImportBtn');
+        const resultBox = document.getElementById('backupImportResult');
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('phone', document.getElementById('backupPhone').value.trim());
+        formData.append('other_name', document.getElementById('backupOtherName').value.trim());
+
+        btn.disabled = true;
+        btn.textContent = 'Restoring… (large backups can take a few minutes)';
+        resultBox.style.display = 'none';
+
+        try {
+            const res = await this.apiUpload('/api/v1/messages/import-backup', formData);
+            if (res.success) {
+                const kindLabel = {
+                    txt: 'chat export (.txt)',
+                    zip: 'export archive (.zip)',
+                    android_sqlite: 'Android full backup (msgstore.db)',
+                    ios_sqlite: 'iOS full backup (ChatStorage.sqlite)',
+                    ios_sqlite_bundle: 'iOS media bundle (DB + media files)',
+                    android_sqlite_bundle: 'Android media bundle (DB + media files)',
+                }[res.kind] || res.kind;
+                const lines = [
+                    `<strong>Backup restored</strong> — detected as ${this.escapeHtml(kindLabel)}.`,
+                    `Chats: ${res.chats ?? 1} · Messages parsed: ${res.parsed_messages}`,
+                    `Newly saved: ${res.newly_inserted} · Duplicates skipped: ${res.duplicates_skipped}`,
+                ];
+                if (res.media_attached !== undefined) {
+                    lines.push(`Media imported: ${res.media_attached} · Thumbnails: ${res.thumbnails_created}`
+                        + ` · Videos skipped: ${res.videos_skipped} · Missing from bundle: ${res.media_missing_from_bundle}`);
+                }
+                if (res.owner_name_detected) lines.push(`Your messages detected as sender: "${this.escapeHtml(res.owner_name_detected)}"`);
+                if (res.system_rows_skipped) lines.push(`System notices skipped: ${res.system_rows_skipped}`);
+                if (res.skipped_files && res.skipped_files.length) {
+                    lines.push(`Skipped files: ${this.escapeHtml(res.skipped_files.join(', '))}`);
+                }
+                resultBox.className = 'backup-result success';
+                resultBox.innerHTML = lines.join('<br>');
+                this.toast(`Restored ${res.newly_inserted} messages from backup`, 'success');
+                fileInput.value = '';
+                this.loadConversations();
+            } else {
+                resultBox.className = 'backup-result error';
+                resultBox.innerHTML = this.escapeHtml(res.message || 'No messages could be read from that file.');
+                this.toast('Nothing imported from that file', 'error');
+            }
+            resultBox.style.display = 'block';
+        } catch (e) {
+            resultBox.className = 'backup-result error';
+            resultBox.innerHTML = this.escapeHtml(e.message);
+            resultBox.style.display = 'block';
+            this.toast(`Restore failed: ${e.message}`, 'error');
+        } finally {
+            btn.disabled = false;
+            btn.textContent = 'Restore Backup';
+        }
     }
 
     // ─── Assistant config ───────────────────────────────────────────────
@@ -330,6 +825,13 @@ class IDeepApp {
             document.getElementById('quietTz').value = qh.timezone || 'UTC';
             document.getElementById('quietMessage').value = qh.message || '';
             document.getElementById('quietDefer').checked = qh.defer_scheduled !== false;
+
+            document.getElementById('replyDelaySeconds').value = data.reply_delay_seconds ?? 60;
+            document.getElementById('humanSnoozeMinutes').value = data.human_snooze_minutes ?? 30;
+            document.getElementById('readHoldMinutes').value = data.read_hold_minutes ?? 5;
+            document.getElementById('commandPrefix').value = data.command_prefix || '#';
+            document.getElementById('controlContact').value = data.control_contact || '';
+            this.renderMutedChats(data.muted_chats || []);
 
             this.renderRules(data.rules || []);
         } catch (e) {
@@ -352,6 +854,11 @@ class IDeepApp {
                 message: document.getElementById('quietMessage').value || '',
                 defer_scheduled: document.getElementById('quietDefer').checked,
             },
+            reply_delay_seconds: parseInt(document.getElementById('replyDelaySeconds').value, 10) || 0,
+            human_snooze_minutes: parseInt(document.getElementById('humanSnoozeMinutes').value, 10) || 0,
+            read_hold_minutes: parseInt(document.getElementById('readHoldMinutes').value, 10) || 0,
+            command_prefix: document.getElementById('commandPrefix').value || '#',
+            control_contact: document.getElementById('controlContact').value.trim(),
         };
         try {
             await this.api('PUT', '/api/v1/assistant/config', payload);
@@ -451,6 +958,36 @@ class IDeepApp {
                 </div>
             `;
         }).join('');
+    }
+
+    renderMutedChats(muted) {
+        const container = document.getElementById('mutedChatsList');
+        if (!container) return;
+        if (!muted || muted.length === 0) {
+            container.innerHTML = '<div class="empty-state">No muted chats. Send <code>#mute</code> inside a chat to mute it.</div>';
+            return;
+        }
+        container.innerHTML = muted.map(m => `
+            <div class="card-row">
+                <div class="card-info">
+                    <div class="title">${this.escapeHtml(m.name || m.chat_key)}</div>
+                    <div class="meta">muted ${this.escapeHtml((m.muted_at || '').slice(0, 16).replace('T', ' '))} UTC</div>
+                </div>
+                <div class="card-actions">
+                    <button class="btn btn-sm btn-outline" onclick="app.unmuteChat('${this.escapeHtml(m.chat_key)}')">Unmute</button>
+                </div>
+            </div>
+        `).join('');
+    }
+
+    async unmuteChat(chatKey) {
+        try {
+            await this.api('DELETE', `/api/v1/assistant/muted/${encodeURIComponent(chatKey)}`);
+            this.toast('Chat unmuted', 'success');
+            this.loadAssistantConfig();
+        } catch (e) {
+            this.toast(`Error: ${e.message}`, 'error');
+        }
     }
 
     async toggleRule(id, enable) {
@@ -853,7 +1390,8 @@ class IDeepApp {
                 document.getElementById(`tab-${btn.dataset.tab}`).classList.add('active');
                 if (btn.dataset.tab === 'schedule') this.loadScheduled();
                 if (btn.dataset.tab === 'assistant') { this.loadAssistantConfig(); this.loadPersonas(); this.loadLLMInfo(); }
-                if (btn.dataset.tab === 'messages') this.loadRecentMessages();
+                if (btn.dataset.tab === 'messages') this.loadConversations();
+                if (btn.dataset.tab !== 'messages') this.stopConvPolling();
                 if (btn.dataset.tab === 'settings') this.loadLLMInfo();
             });
         });
@@ -868,7 +1406,27 @@ class IDeepApp {
         // Messages
         document.getElementById('sendMessageForm').addEventListener('submit', (e) => { e.preventDefault(); this.sendMessage(); });
         document.getElementById('searchForm').addEventListener('submit', (e) => { e.preventDefault(); this.searchMessages(); });
-        document.getElementById('refreshMessages').addEventListener('click', () => this.loadRecentMessages());
+        document.getElementById('refreshConversations').addEventListener('click', () => {
+            this.loadConversations();
+            this.refreshActiveConversation();
+        });
+        document.getElementById('convFilter').addEventListener('input', () => this.renderConvList());
+        document.getElementById('convList').addEventListener('click', (e) => {
+            const item = e.target.closest('.conv-item');
+            if (item) this.openConversation(item.dataset.jid);
+        });
+        document.getElementById('convSendForm').addEventListener('submit', (e) => { e.preventDefault(); this.sendConvMessage(); });
+        document.getElementById('convMessages').addEventListener('click', (e) => this.onConvMediaClick(e));
+        const attachBtn = document.getElementById('convAttachBtn');
+        if (attachBtn) {
+            attachBtn.addEventListener('click', () => document.getElementById('convAttachInput').click());
+            document.getElementById('convAttachInput').addEventListener('change', (e) => {
+                this.setAttachment(e.target.files && e.target.files[0]);
+            });
+            document.getElementById('convAttachClear').addEventListener('click', () => this.setAttachment(null));
+        }
+        const backupForm = document.getElementById('backupImportForm');
+        if (backupForm) backupForm.addEventListener('submit', (e) => { e.preventDefault(); this.importBackup(); });
 
         // Assistant
         document.getElementById('assistantForm').addEventListener('submit', (e) => { e.preventDefault(); this.saveAssistantConfig(); });

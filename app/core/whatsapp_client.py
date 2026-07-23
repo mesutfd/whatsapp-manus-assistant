@@ -87,6 +87,15 @@ class WhatsAppClientManager:
         self._last_sent_id: Optional[str] = None
         self._last_sent_at: Optional[float] = None
         self._last_receipt_at: Optional[float] = None
+        # Human-handover state. `_human_activity` maps chat_key -> epoch of the
+        # owner's last outgoing message in that chat; while fresh, auto-reply
+        # stays out of the chat. `_pending_replies` holds per-chat debounced
+        # auto-replies waiting to fire (cancelled if the owner replies first).
+        # `_bot_sent_ids` remembers message ids the auto-reply engine itself
+        # sent, so their echo events are never mistaken for owner activity.
+        self._human_activity: Dict[str, float] = {}
+        self._pending_replies: Dict[str, Dict[str, Any]] = {}
+        self._bot_sent_ids: Dict[str, None] = {}
 
     @property
     def state(self) -> ConnectionState:
@@ -220,6 +229,7 @@ class WhatsAppClientManager:
         logger.info("Initializing WhatsApp client...")
         await self._sync_settings_from_db()
         await self._load_message_store_from_db()
+        await self._seed_human_activity_from_store()
 
         self._client = NewAClient(
             settings.WA_DATABASE_PATH,
@@ -302,6 +312,10 @@ class WhatsAppClientManager:
             # Any server/delivery/read receipt is proof the session is healthy.
             self._consecutive_send_no_receipt = 0
             self._last_receipt_at = time.time()
+            try:
+                self._handle_owner_read_receipt(event)
+            except Exception as e:
+                logger.debug(f"Read-receipt inspection failed: {e}")
             await self._emit_event("receipt", {
                 "type": str(event.Type),
                 "timestamp": str(event.Timestamp),
@@ -616,6 +630,11 @@ class WhatsAppClientManager:
             "message_id": msg_id,
         }
 
+        # An outgoing send via the API/panel means a human (or their agent) is
+        # handling this chat — the auto-reply engine backs off for the snooze
+        # window and drops any reply it had queued.
+        self._note_human_activity(self._chat_key(Jid2String(target_jid)))
+
         # Mirror outgoing sends into the message store so they show up in
         # /messages/history alongside incoming messages.
         if settings.MESSAGE_STORE_ENABLED:
@@ -808,6 +827,13 @@ class WhatsAppClientManager:
                 "message": cfg.get("quiet_hours_message", ""),
                 "defer_scheduled": bool(cfg.get("quiet_hours_defer_scheduled")),
             },
+            "human_snooze_minutes": int(cfg.get("human_snooze_minutes", 30) or 0),
+            "reply_delay_seconds": int(cfg.get("reply_delay_seconds", 60) or 0),
+            "read_hold_minutes": int(cfg.get("read_hold_minutes", 5) or 0),
+            "command_prefix": cfg.get("command_prefix") or "#",
+            "control_contact": cfg.get("control_contact") or "",
+            "suspended_until": cfg.get("suspended_until") or "",
+            "muted_chats": await db.list_muted_chats(),
             "rules": rules,
         }
 
@@ -855,18 +881,364 @@ class WhatsAppClientManager:
             return h_low.lstrip().startswith(n_low)
         return n_low in h_low  # contains (default)
 
+    # ─── Human handover: owner presence, debounce, control commands ──────
+
+    def _chat_key(self, chat_jid: str) -> str:
+        """Canonical per-chat identity: phone digits when resolvable, so the
+        phone-form and LID-form addressing of the same chat share one key."""
+        if not chat_jid:
+            return ""
+        if chat_jid.endswith("@lid"):
+            resolved = self._resolve_lid_phone(chat_jid)
+            return self.normalize_phone(resolved) if resolved else chat_jid
+        if "@" in chat_jid:
+            digits = self.normalize_phone(chat_jid.split("@")[0])
+            return digits or chat_jid
+        return self.normalize_phone(chat_jid) or chat_jid
+
+    def _note_human_activity(self, chat_key: str) -> None:
+        """The owner (or their panel/agent) sent something in this chat —
+        refresh the snooze window and cancel any reply the bot had queued."""
+        if not chat_key:
+            return
+        self._human_activity[chat_key] = time.time()
+        self._cancel_pending_reply(chat_key, "owner is active in this chat")
+
+    def _human_active_since(self, chat_key: str, snooze_seconds: int) -> bool:
+        if snooze_seconds <= 0 or not chat_key:
+            return False
+        last = self._human_activity.get(chat_key)
+        return last is not None and (time.time() - last) < snooze_seconds
+
+    def _cancel_pending_reply(self, chat_key: str, reason: str) -> None:
+        pending = self._pending_replies.pop(chat_key, None)
+        if pending:
+            task = pending.get("task")
+            if task and not task.done():
+                task.cancel()
+            logger.info("Cancelled pending auto-reply for %s: %s", chat_key, reason)
+
+    def _remember_bot_send(self, msg_id: str) -> None:
+        if not msg_id:
+            return
+        self._bot_sent_ids[msg_id] = None
+        while len(self._bot_sent_ids) > 1000:
+            self._bot_sent_ids.pop(next(iter(self._bot_sent_ids)))
+
+    @staticmethod
+    def _parse_epoch(iso_ts: Any) -> Optional[float]:
+        """ISO timestamp string (naive = UTC) -> epoch seconds, or None."""
+        if not iso_ts:
+            return None
+        try:
+            from datetime import timezone
+            dt = datetime.fromisoformat(str(iso_ts))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _format_stamp(iso_ts: Any) -> str:
+        """ISO timestamp -> 'YYYY-MM-DD HH:MM' for LLM context lines."""
+        if not iso_ts:
+            return ""
+        try:
+            return datetime.fromisoformat(str(iso_ts)).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return ""
+
+    async def _seed_human_activity_from_store(self) -> None:
+        """Rebuild the owner-activity map after a restart so a redeploy in
+        the middle of a conversation doesn't let the bot barge back in."""
+        try:
+            from app.core.database import db
+
+            cfg = await db.get_config()
+            snooze_s = int(cfg.get("human_snooze_minutes") or 30) * 60
+            if snooze_s <= 0:
+                return
+            cutoff = time.time() - snooze_s
+            for msg in self._message_store:
+                if not msg.get("is_from_me") or msg.get("is_group"):
+                    continue
+                ts = self._parse_epoch(msg.get("timestamp"))
+                if ts is None or ts < cutoff:
+                    continue
+                key = self._chat_key(msg.get("chat_jid") or "")
+                if key:
+                    self._human_activity[key] = max(self._human_activity.get(key, 0.0), ts)
+            if self._human_activity:
+                logger.info(
+                    "Seeded owner-activity snooze for %d chat(s) from history",
+                    len(self._human_activity),
+                )
+        except Exception as e:
+            logger.warning(f"Could not seed owner activity from history: {e}")
+
+    def _handle_owner_read_receipt(self, event: "ReceiptEv") -> None:
+        """The owner read a chat on their phone while an auto-reply was
+        pending: extend the hold — they saw it, they get first right of reply."""
+        src = getattr(event, "MessageSource", None)
+        if src is None or not getattr(src, "IsFromMe", False):
+            return
+        try:
+            enum = type(event).DESCRIPTOR.fields_by_name["Type"].enum_type
+            type_name = enum.values_by_number[int(event.Type)].name
+        except Exception:
+            type_name = str(getattr(event, "Type", ""))
+        if "READ" not in type_name.upper():
+            return
+        chat = getattr(src, "Chat", None)
+        chat_key = self._chat_key(Jid2String(chat)) if chat is not None else ""
+        pending = self._pending_replies.get(chat_key)
+        if not pending or pending.get("read_extended") or pending.get("read_hold_s", 0) <= 0:
+            return
+        pending["deadline"] = max(pending["deadline"], time.time() + pending["read_hold_s"])
+        pending["read_extended"] = True
+        logger.info(
+            "Owner read chat %s on their phone — holding auto-reply %ds for a manual answer",
+            chat_key, pending["read_hold_s"],
+        )
+
+    async def _maybe_handle_command(
+        self, client: NewAClient, info: Any, chat_jid: str, chat_key: str, text: str
+    ) -> None:
+        """Parse and execute an owner control command. Only ever called for
+        the owner's own messages — incoming messages can never reach this."""
+        from app.core.control_commands import parse_command
+        from app.core.database import db
+
+        cfg = await db.get_config()
+        prefix = (cfg.get("command_prefix") or "#").strip() or "#"
+        control = self.normalize_phone(cfg.get("control_contact") or "")
+        is_control_chat = bool(control) and chat_key == control
+        cmd = parse_command(text, prefix=prefix, is_control_chat=is_control_chat)
+        if cmd is None:
+            return
+
+        ack = ""
+        if cmd.action == "global_on":
+            await db.update_config(enabled=True, suspended_until="")
+            settings.AUTO_REPLY_ENABLED = True
+            ack = "auto-reply enabled"
+        elif cmd.action == "global_off":
+            if cmd.duration_seconds:
+                from datetime import timedelta
+                until = datetime.utcnow() + timedelta(seconds=cmd.duration_seconds)
+                await db.update_config(suspended_until=until.isoformat())
+                ack = f"auto-reply paused until {until.strftime('%Y-%m-%d %H:%M')} UTC"
+            else:
+                await db.update_config(enabled=False)
+                settings.AUTO_REPLY_ENABLED = False
+                ack = "auto-reply disabled"
+        elif cmd.action == "mute":
+            await db.mute_chat(chat_key, chat_jid)
+            self._cancel_pending_reply(chat_key, "chat muted by owner command")
+            ack = "chat muted"
+        elif cmd.action == "unmute":
+            await db.unmute_chat(chat_key)
+            # Hand the chat back to the bot immediately, not after the snooze.
+            self._human_activity.pop(chat_key, None)
+            ack = "chat unmuted"
+        elif cmd.action == "status":
+            await self._send_status_report(client, info, cfg, chat_key, control)
+            ack = "status sent"
+
+        logger.info("Owner command %r in chat %s: %s", cmd.raw, chat_key, ack)
+        await self._emit_event("command_executed", {
+            "command": cmd.raw, "action": cmd.action, "chat": chat_key, "result": ack,
+        })
+        await self._react_to_message(client, info, "✅")
+
+    async def _send_status_report(
+        self, client: NewAClient, info: Any, cfg: Dict[str, Any], chat_key: str, control_digits: str
+    ) -> None:
+        from app.core.database import db
+
+        muted = await db.list_muted_chats()
+        susp = (cfg.get("suspended_until") or "").strip()
+        susp_ts = self._parse_epoch(susp)
+        lines = [
+            f"*{settings.ASSISTANT_NAME} status*",
+            f"Auto-reply: {'ON' if cfg.get('enabled') else 'OFF'}",
+        ]
+        if susp_ts and susp_ts > time.time():
+            lines.append(f"Paused until: {susp[:16].replace('T', ' ')} UTC")
+        lines.append(f"LLM replies: {'ON' if cfg.get('llm_enabled') else 'OFF'}")
+        lines.append(
+            f"Owner snooze: {cfg.get('human_snooze_minutes', 30)} min · "
+            f"reply delay: {cfg.get('reply_delay_seconds', 60)}s"
+        )
+        lines.append(f"Muted chats: {len(muted)}")
+        if await db.is_chat_muted(chat_key):
+            lines.append("This chat: muted")
+
+        # Prefer the private control chat; fall back to where it was asked.
+        target = build_jid(control_digits) if control_digits else info.MessageSource.Chat
+        try:
+            resp = await client.send_message(target, "\n".join(lines))
+            self._remember_bot_send(getattr(resp, "ID", "") or "")
+        except Exception as e:
+            logger.warning(f"Could not send status report: {e}")
+
+    async def _react_to_message(self, client: NewAClient, info: Any, emoji: str) -> None:
+        """Best-effort emoji acknowledgment on the owner's command message."""
+        try:
+            src = info.MessageSource
+            reaction = await client.build_reaction(src.Chat, src.Sender, info.ID, emoji)
+            resp = await client.send_message(src.Chat, reaction)
+            self._remember_bot_send(getattr(resp, "ID", "") or "")
+        except Exception as e:
+            logger.debug(f"Could not react to command message: {e}")
+
+    async def _queue_auto_reply(
+        self,
+        client: NewAClient,
+        info: Any,
+        chat_key: str,
+        msg_record: Dict[str, Any],
+        sender_jid: str,
+        sender_name: str,
+        sender_jid_alt: Optional[str],
+    ) -> None:
+        """Debounced entry point for auto-replies. Messages arriving while a
+        reply is pending fold into it (one reply per burst); the owner
+        replying first, or reading the chat, delays/cancels it."""
+        from app.core.database import db
+
+        cfg = await db.get_config()
+        if not cfg.get("enabled"):
+            return
+        if await db.is_chat_muted(chat_key):
+            logger.debug("Auto-reply skipped: chat %s is muted", chat_key)
+            return
+        snooze_s = int(cfg.get("human_snooze_minutes") or 0) * 60
+        if self._human_active_since(chat_key, snooze_s):
+            logger.info("Auto-reply skipped: owner active in chat %s within snooze window", chat_key)
+            return
+
+        raw_delay = cfg.get("reply_delay_seconds")
+        delay = max(0, int(raw_delay)) if raw_delay is not None else 60
+
+        pending = self._pending_replies.get(chat_key)
+        if pending and not pending.get("firing"):
+            pending["messages"].append(msg_record)
+            pending["deadline"] = time.time() + delay
+            return
+
+        pending = {
+            "chat": info.MessageSource.Chat,
+            "chat_jid": msg_record.get("chat_jid") or "",
+            "sender_jid": sender_jid,
+            "sender_jid_alt": sender_jid_alt,
+            "sender_name": sender_name,
+            "messages": [msg_record],
+            "deadline": time.time() + delay,
+            "read_extended": False,
+            "firing": False,
+            "read_hold_s": int(cfg.get("read_hold_minutes") or 0) * 60,
+            "snooze_s": snooze_s,
+        }
+        self._pending_replies[chat_key] = pending
+        pending["task"] = asyncio.create_task(self._deliver_pending_reply(client, chat_key))
+
+    async def _deliver_pending_reply(self, client: NewAClient, chat_key: str) -> None:
+        """Worker for one pending auto-reply: wait out the debounce window
+        (extended by bursts or by the owner reading the chat), re-check
+        suppression, then evaluate and send a single reply for the burst."""
+        pending = self._pending_replies.get(chat_key)
+        if not pending:
+            return
+        try:
+            while True:
+                remaining = pending["deadline"] - time.time()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(remaining, 5.0))
+            # From here on, new messages start a fresh pending cycle instead
+            # of folding into a reply that is already being computed.
+            pending["firing"] = True
+
+            from app.core.database import db
+
+            if await db.is_chat_muted(chat_key):
+                return
+            if self._human_active_since(chat_key, pending["snooze_s"]):
+                return
+
+            combined = "\n".join(
+                t for t in ((m.get("text") or "").strip() for m in pending["messages"]) if t
+            ).strip()
+            if not combined:
+                return
+            exclude_ids = {str(m.get("id")) for m in pending["messages"] if m.get("id")}
+
+            should_reply, reply_text, matched_rule = await self._evaluate_auto_reply(
+                pending["sender_jid"],
+                combined,
+                sender_pushname=pending["sender_name"],
+                sender_jid_alt=pending["sender_jid_alt"],
+                exclude_ids=exclude_ids,
+            )
+            if not (should_reply and reply_text):
+                return
+
+            resp = await client.send_message(pending["chat"], reply_text)
+            sent_id = getattr(resp, "ID", "") or ""
+            self._remember_bot_send(sent_id)
+            await self._record_bot_reply(pending["chat_jid"], sent_id, reply_text)
+            logger.info(f"Auto-replied to {pending['sender_name']}: {reply_text[:80]}")
+            await self._emit_event("auto_reply_sent", {
+                "to": pending["sender_jid"],
+                "message": reply_text,
+                "original_message": combined,
+                "rule_id": matched_rule.get("id") if matched_rule else None,
+                "via_llm": bool(matched_rule and matched_rule.get("use_llm")),
+            })
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"Pending auto-reply for {chat_key} failed: {e}")
+        finally:
+            if self._pending_replies.get(chat_key) is pending:
+                self._pending_replies.pop(chat_key, None)
+
+    async def _record_bot_reply(self, chat_jid: str, sent_id: str, text: str) -> None:
+        """Persist the bot's own reply so it shows up in history and —
+        crucially — as an assistant turn in future LLM context."""
+        if not settings.MESSAGE_STORE_ENABLED:
+            return
+        record = {
+            "id": sent_id or f"autoreply-{int(time.time() * 1000)}",
+            "from": "me",
+            "chat_jid": chat_jid or "unknown",
+            "sender_name": settings.ASSISTANT_NAME,
+            "text": text,
+            "timestamp": datetime.utcnow().isoformat(),
+            "is_group": False,
+            "is_from_me": True,
+            "type": "text",
+        }
+        self._message_store.append(record)
+        if len(self._message_store) > settings.MAX_STORED_MESSAGES:
+            self._message_store = self._message_store[-settings.MAX_STORED_MESSAGES:]
+        await self._persist_message(record)
+
     async def _evaluate_auto_reply(
         self,
         sender_jid: str,
         message_text: str,
         sender_pushname: Optional[str] = None,
         sender_jid_alt: Optional[str] = None,
+        exclude_ids: Optional[set] = None,
     ) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
         """
         Decide whether to auto-reply. Returns (should_reply, reply_text, matched_rule).
 
         Resolution order:
-            1. Global enabled? — no → silent.
+            1. Global enabled / not suspended? — no → silent.
             2. Quiet hours? — yes → away message or silent.
             3. First matching enabled rule (in priority order) → its reply.
             4. No rule matched + global llm_enabled → LLM catch-all.
@@ -881,6 +1253,15 @@ class WhatsAppClientManager:
         if not cfg.get("enabled"):
             logger.debug("Auto-reply skipped: globally disabled")
             return False, "", None
+
+        # `off 2h` owner command: temporary suspension with auto re-enable.
+        suspended = (cfg.get("suspended_until") or "").strip()
+        if suspended:
+            susp_ts = self._parse_epoch(suspended)
+            if susp_ts and time.time() < susp_ts:
+                logger.debug("Auto-reply skipped: suspended until %s", suspended)
+                return False, "", None
+            await db.update_config(suspended_until="")
 
         if is_quiet_now(cfg):
             quiet_msg = (cfg.get("quiet_hours_message") or "").strip()
@@ -947,7 +1328,10 @@ class WhatsAppClientManager:
                 wants_llm = False
 
             if wants_llm:
-                reply = await self._llm_reply(cfg, persona, sender_jid, message_text)
+                reply = await self._llm_reply(
+                    cfg, persona, sender_jid, message_text,
+                    sender_jid_alt=sender_jid_alt, exclude_ids=exclude_ids,
+                )
                 if reply is not None:
                     if cooldown > 0:
                         await db.touch_cooldown(int(matched_rule["id"]), sender_jid, now_ts)
@@ -971,7 +1355,10 @@ class WhatsAppClientManager:
         should_use_llm = (llm_globally_on or persona_wants_llm) and not persona_blocks_llm
 
         if should_use_llm:
-            reply = await self._llm_reply(cfg, persona, sender_jid, message_text)
+            reply = await self._llm_reply(
+                cfg, persona, sender_jid, message_text,
+                sender_jid_alt=sender_jid_alt, exclude_ids=exclude_ids,
+            )
             if reply is not None:
                 source = "persona-driven" if persona_wants_llm and not llm_globally_on else "catch-all"
                 logger.info("Auto-reply: LLM (%s) replied to %s", source, sender_jid)
@@ -998,6 +1385,8 @@ class WhatsAppClientManager:
         persona: Optional[Dict[str, Any]],
         sender_jid: str,
         message_text: str,
+        sender_jid_alt: Optional[str] = None,
+        exclude_ids: Optional[set] = None,
     ) -> Optional[str]:
         """Build prompt, call LLM. Returns None on failure or when not configured."""
         from app.core.llm import LLMError, llm_client
@@ -1015,30 +1404,91 @@ class WhatsAppClientManager:
         if notes:
             system_prompt = f"{system_prompt}\n\nContact context:\n{notes}"
 
-        history = self._recent_history_for_chat(sender_jid, settings.LLM_HISTORY_SIZE)
+        now_utc = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+        system_prompt = (
+            f"{system_prompt}\n\nCurrent date/time: {now_utc} UTC. Earlier messages in the "
+            "conversation are prefixed with their UTC timestamp in [brackets]; use them to "
+            "understand how recent each message is. Never include such a bracketed timestamp "
+            "prefix in your own reply."
+        )
+
+        history = await self._recent_history_for_chat(
+            sender_jid,
+            settings.LLM_HISTORY_SIZE,
+            sender_jid_alt=sender_jid_alt,
+            exclude_ids=exclude_ids,
+            command_prefix=(cfg.get("command_prefix") or "#"),
+        )
         try:
             return await llm_client.generate_reply(
                 system_prompt=system_prompt,
                 history=history,
-                user_message=message_text,
+                user_message=f"[{now_utc}] {message_text}",
             )
         except LLMError as e:
             logger.warning("LLM reply failed: %s", e)
             return None
 
-    def _recent_history_for_chat(self, sender_jid: str, limit: int) -> List[Dict[str, str]]:
-        """Build {role, content} history for the LLM from the in-memory store."""
+    async def _recent_history_for_chat(
+        self,
+        sender_jid: str,
+        limit: int,
+        sender_jid_alt: Optional[str] = None,
+        exclude_ids: Optional[set] = None,
+        command_prefix: str = "#",
+    ) -> List[Dict[str, str]]:
+        """Build timestamped {role, content} history for the LLM, oldest first.
+
+        Reads the persisted per-chat history (covering both phone-form and
+        LID-form addressing of the same chat, plus the bot's own recorded
+        replies as assistant turns) and falls back to the in-memory store if
+        the DB read fails. Owner control commands and the messages currently
+        being replied to (exclude_ids) are left out.
+        """
         if limit <= 0:
             return []
+        exclude_ids = exclude_ids or set()
+
+        # All JID forms this chat's messages may be stored under.
+        jids = set()
+        for j in (sender_jid, sender_jid_alt):
+            if not j:
+                continue
+            jids.add(j)
+            if j.endswith("@s.whatsapp.net"):
+                digits = self.normalize_phone(j)
+                if digits:
+                    jids.add(f"{digits}@s.whatsapp.net")
+            elif j.endswith("@lid"):
+                resolved = self._resolve_lid_phone(j)
+                if resolved:
+                    jids.add(resolved)
+
+        records: List[Dict[str, Any]] = []
+        try:
+            from app.core.message_history import message_history_db
+
+            # Fetch extra to survive the filters below and still fill `limit`.
+            records = await message_history_db.get_chat_multi(sorted(jids), limit=limit * 2)
+        except Exception as e:
+            logger.warning(f"Chat history read failed, using in-memory store: {e}")
+            records = [
+                m for m in self._message_store[-500:]
+                if m.get("chat_jid") in jids or m.get("from") in jids
+            ]
+
         history: List[Dict[str, str]] = []
-        for msg in self._message_store[-500:]:
-            if msg.get("chat_jid") != sender_jid and msg.get("from") != sender_jid:
+        for msg in records:
+            if str(msg.get("id")) in exclude_ids:
                 continue
             text = (msg.get("text") or "").strip()
             if not text or text.startswith("["):
                 continue
+            if msg.get("is_from_me") and command_prefix and text.startswith(command_prefix):
+                continue  # owner control commands are not conversation
             role = "assistant" if msg.get("is_from_me") else "user"
-            history.append({"role": role, "content": text})
+            stamp = self._format_stamp(msg.get("timestamp"))
+            history.append({"role": role, "content": f"[{stamp}] {text}" if stamp else text})
         return history[-limit:]
 
     async def _persist_message(self, msg_record: Dict[str, Any]) -> None:
@@ -1070,29 +1520,291 @@ class WhatsAppClientManager:
             except Exception as e:
                 logger.error(f"Event handler error for {event_type}: {e}")
 
+    # ─── Media handling ──────────────────────────────────────────────────
+
+    @staticmethod
+    def _unwrap_message(message: WAMessage) -> WAMessage:
+        """Peel ephemeral / view-once / captioned-document wrappers so the
+        media extractors and download_any see the real payload."""
+        for _ in range(4):
+            for wrapper in ("ephemeralMessage", "viewOnceMessage", "viewOnceMessageV2",
+                            "viewOnceMessageV2Extension", "documentWithCaptionMessage"):
+                inner = getattr(message, wrapper, None)
+                if inner is not None and inner.HasField("message"):
+                    message = inner.message
+                    break
+            else:
+                return message
+        return message
+
+    @staticmethod
+    def _extract_media_info(message: WAMessage) -> Optional[Dict[str, Any]]:
+        """Inspect a (already unwrapped) Message proto. Returns None for plain
+        text, else {kind, caption, meta, downloadable, inline_thumb}."""
+
+        def base(kind: str, caption: str = "", downloadable: bool = True,
+                 inline_thumb: bytes = b"", **meta: Any) -> Dict[str, Any]:
+            return {
+                "kind": kind,
+                "caption": caption or "",
+                "downloadable": downloadable,
+                "inline_thumb": inline_thumb or None,
+                "meta": {k: v for k, v in meta.items() if v not in (None, "", 0, 0.0)},
+            }
+
+        if message.HasField("imageMessage"):
+            m = message.imageMessage
+            return base("image", m.caption, mimetype=m.mimetype, size=int(m.fileLength),
+                        width=int(m.width), height=int(m.height),
+                        inline_thumb=m.JPEGThumbnail)
+        if message.HasField("stickerMessage"):
+            m = message.stickerMessage
+            return base("sticker", "", mimetype=m.mimetype or "image/webp",
+                        size=int(m.fileLength))
+        if message.HasField("videoMessage"):
+            m = message.videoMessage
+            kind = "gif" if m.gifPlayback else "video"
+            return base(kind, m.caption, mimetype=m.mimetype, size=int(m.fileLength),
+                        duration=int(m.seconds), width=int(m.width), height=int(m.height),
+                        inline_thumb=m.JPEGThumbnail)
+        if message.HasField("ptvMessage"):  # round "video note"
+            m = message.ptvMessage
+            return base("video", "", mimetype=m.mimetype, size=int(m.fileLength),
+                        duration=int(m.seconds), inline_thumb=m.JPEGThumbnail)
+        if message.HasField("audioMessage"):
+            m = message.audioMessage
+            return base("voice" if m.PTT else "audio", "", mimetype=m.mimetype,
+                        size=int(m.fileLength), duration=int(m.seconds))
+        if message.HasField("documentMessage"):
+            m = message.documentMessage
+            return base("document", m.caption, mimetype=m.mimetype,
+                        size=int(m.fileLength),
+                        filename=m.fileName or m.title, inline_thumb=m.JPEGThumbnail)
+        if message.HasField("contactMessage"):
+            m = message.contactMessage
+            return base("contact", "", downloadable=False,
+                        contact_name=m.displayName, vcard=m.vcard)
+        if message.HasField("contactsArrayMessage"):
+            m = message.contactsArrayMessage
+            vcards = "\n".join(c.vcard for c in m.contacts if c.vcard)
+            names = ", ".join(c.displayName for c in m.contacts if c.displayName)
+            return base("contact", "", downloadable=False,
+                        contact_name=names or m.displayName, vcard=vcards)
+        if message.HasField("locationMessage"):
+            m = message.locationMessage
+            return base("location", m.comment, downloadable=False,
+                        latitude=m.degreesLatitude, longitude=m.degreesLongitude,
+                        location_name=m.name, address=m.address,
+                        inline_thumb=m.JPEGThumbnail)
+        if message.HasField("liveLocationMessage"):
+            m = message.liveLocationMessage
+            return base("location", m.caption, downloadable=False,
+                        latitude=m.degreesLatitude, longitude=m.degreesLongitude,
+                        inline_thumb=m.JPEGThumbnail)
+        return None
+
+    async def _store_incoming_media(
+        self, client: NewAClient, message: WAMessage, info: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Download incoming media and persist original (+ thumbnail for
+        images) to GridFS. Falls back to a placeholder on any failure."""
+        from app.core import media_store
+
+        media: Dict[str, Any] = {
+            "kind": info["kind"],
+            "file_id": None,
+            "thumb_id": None,
+            "placeholder": True,
+            **info["meta"],
+        }
+
+        data: Optional[bytes] = None
+        if info["downloadable"]:
+            try:
+                data = await client.download_any(message)
+            except Exception as e:
+                logger.warning("Media download failed (%s): %s", info["kind"], e)
+
+        try:
+            if data:
+                media["size"] = len(data)
+                media["file_id"] = await media_store.save_bytes(
+                    data,
+                    filename=media.get("filename"),
+                    mimetype=media.get("mimetype"),
+                    metadata={"kind": info["kind"], "role": "original"},
+                )
+                media["placeholder"] = False
+                if info["kind"] in ("image", "sticker"):
+                    thumb = await asyncio.to_thread(media_store.make_image_thumbnail, data)
+                    if thumb:
+                        media["thumb_id"] = await media_store.save_bytes(
+                            thumb, filename="thumb.jpg", mimetype="image/jpeg",
+                            metadata={"kind": info["kind"], "role": "thumbnail"},
+                        )
+            # Videos/documents: use WhatsApp's embedded preview as the thumbnail.
+            if not media["thumb_id"] and info.get("inline_thumb"):
+                media["thumb_id"] = await media_store.save_bytes(
+                    info["inline_thumb"], filename="thumb.jpg", mimetype="image/jpeg",
+                    metadata={"kind": info["kind"], "role": "thumbnail"},
+                )
+            if info["kind"] == "contact" or info["kind"] == "location":
+                media["placeholder"] = False
+        except Exception as e:
+            logger.error("Storing media failed (%s): %s", info["kind"], e)
+        return media
+
+    async def send_media(
+        self,
+        phone: str,
+        data: bytes,
+        kind: str,
+        mimetype: Optional[str] = None,
+        filename: Optional[str] = None,
+        caption: str = "",
+    ) -> Dict[str, Any]:
+        """Send a media message (image/video/gif/audio/voice/document/sticker)
+        and mirror it into the message store like send_message does."""
+        if not self.is_connected:
+            raise ConnectionError("WhatsApp is not connected")
+
+        if not await self._check_logged_in():
+            await self._emit_event(
+                "session_expired", {"reason": "preflight is_logged_in=False before media send"}
+            )
+            try:
+                await self.logout()
+            except Exception as e:
+                logger.error(f"Auto-logout after preflight failure: {e}")
+            return {
+                "success": False,
+                "error": "WhatsApp session is no longer logged in. "
+                         "Click 'Connect' to scan a fresh QR and re-link.",
+                "to": phone,
+            }
+
+        normalized = self.normalize_phone(phone)
+        if not normalized or len(normalized) < 8 or len(normalized) > 15:
+            return {"success": False, "error": "Invalid phone number", "to": phone}
+
+        try:
+            checks = await self._client.is_on_whatsapp(normalized)
+        except Exception as e:
+            return {"success": False, "error": f"Lookup failed: {e}", "to": phone}
+        target_jid = next((r.JID for r in checks or [] if getattr(r, "IsIn", False)), None)
+        if target_jid is None:
+            return {
+                "success": False,
+                "error": f"Number {normalized} is not registered on WhatsApp",
+                "to": phone,
+            }
+
+        try:
+            if kind == "image":
+                resp = await self._client.send_image(target_jid, data, caption=caption or None)
+            elif kind in ("video", "gif"):
+                resp = await self._client.send_video(
+                    target_jid, data, caption=caption or None, gifplayback=(kind == "gif")
+                )
+            elif kind in ("audio", "voice"):
+                resp = await self._client.send_audio(target_jid, data, ptt=(kind == "voice"))
+            elif kind == "sticker":
+                resp = await self._client.send_sticker(target_jid, data)
+            else:
+                kind = "document"
+                resp = await self._client.send_document(
+                    target_jid, data, caption=caption or None,
+                    filename=filename or "file", title=filename or "file",
+                    mimetype=mimetype,
+                )
+        except Exception as e:
+            logger.error(f"Failed to send {kind} to {normalized}: {e}")
+            return {"success": False, "error": str(e), "to": phone}
+
+        msg_id = getattr(resp, "ID", "") if resp else ""
+        ts = int(getattr(resp, "Timestamp", 0) or 0) if resp else 0
+        if not msg_id or ts == 0:
+            return {
+                "success": False,
+                "error": "WhatsApp did not acknowledge the send (no message id/timestamp)",
+                "to": phone,
+            }
+
+        sent_iso = (
+            datetime.utcfromtimestamp(ts).isoformat() if ts else datetime.utcnow().isoformat()
+        )
+        result = {
+            "success": True,
+            "to": normalized,
+            "message": caption or f"[{kind}]",
+            "timestamp": sent_iso,
+            "message_id": msg_id,
+            "kind": kind,
+        }
+
+        if settings.MESSAGE_STORE_ENABLED:
+            from app.core import media_store
+
+            media: Dict[str, Any] = {
+                "kind": kind, "file_id": None, "thumb_id": None, "placeholder": True,
+                "mimetype": mimetype, "size": len(data),
+            }
+            if filename:
+                media["filename"] = filename
+            try:
+                media["file_id"] = await media_store.save_bytes(
+                    data, filename=filename, mimetype=mimetype,
+                    metadata={"kind": kind, "role": "original"},
+                )
+                media["placeholder"] = False
+                if kind in ("image", "sticker"):
+                    thumb = await asyncio.to_thread(media_store.make_image_thumbnail, data)
+                    if thumb:
+                        media["thumb_id"] = await media_store.save_bytes(
+                            thumb, filename="thumb.jpg", mimetype="image/jpeg",
+                            metadata={"kind": kind, "role": "thumbnail"},
+                        )
+            except Exception as e:
+                logger.error("Persisting sent media failed: %s", e)
+
+            sent_record = {
+                "id": msg_id,
+                "from": "me",
+                "chat_jid": Jid2String(target_jid),
+                "sender_name": "Me",
+                "text": caption or "",
+                "timestamp": sent_iso,
+                "is_group": False,
+                "is_from_me": True,
+                "type": kind,
+                "media": media,
+            }
+            self._message_store.append(sent_record)
+            if len(self._message_store) > settings.MAX_STORED_MESSAGES:
+                self._message_store = self._message_store[-settings.MAX_STORED_MESSAGES:]
+            await self._persist_message(sent_record)
+
+        logger.info(f"{kind} sent to {normalized} (id={msg_id})")
+        await self._emit_event("message_sent", result)
+        return result
+
     async def _handle_incoming_message(self, client: NewAClient, event: MessageEv):
         """Process incoming messages, store them, and handle auto-reply."""
         try:
             # Extract message info
             info = event.Info
-            message = event.Message
+            message = self._unwrap_message(event.Message)
 
-            # Get text content
+            media_info = self._extract_media_info(message)
+
+            # Get text content (for media messages: the caption)
             text = ""
-            if message.conversation:
+            if media_info:
+                text = media_info["caption"]
+            elif message.conversation:
                 text = message.conversation
             elif message.extendedTextMessage and message.extendedTextMessage.text:
                 text = message.extendedTextMessage.text
-            elif message.imageMessage and message.imageMessage.caption:
-                text = f"[Image] {message.imageMessage.caption}"
-            elif message.videoMessage and message.videoMessage.caption:
-                text = f"[Video] {message.videoMessage.caption}"
-            elif message.documentMessage:
-                text = f"[Document] {message.documentMessage.fileName}"
-            elif message.audioMessage:
-                text = "[Audio Message]"
-            elif message.stickerMessage:
-                text = "[Sticker]"
 
             sender_jid = Jid2String(info.MessageSource.Sender) if info.MessageSource.Sender else "unknown"
             # SenderAlt is the alternate addressing form (PN <-> LID). Only
@@ -1134,8 +1846,18 @@ class WhatsAppClientManager:
                 "timestamp": datetime.utcnow().isoformat(),
                 "is_group": is_group,
                 "is_from_me": is_from_me,
-                "type": "text" if text and not text.startswith("[") else "media",
+                "type": media_info["kind"] if media_info else "text",
             }
+            # Echoes of the auto-reply engine's own sends: already recorded at
+            # send time, and must never count as owner activity (the bot would
+            # snooze itself) — drop them before storing.
+            if is_from_me and msg_record["id"] in self._bot_sent_ids:
+                return
+
+            if media_info:
+                msg_record["media"] = await self._store_incoming_media(
+                    client, message, media_info
+                )
 
             # Store message
             if settings.MESSAGE_STORE_ENABLED:
@@ -1149,28 +1871,23 @@ class WhatsAppClientManager:
             # Emit event
             await self._emit_event("message", msg_record)
 
-            # Auto-reply logic (don't reply to own messages or group messages)
-            if not is_from_me and not is_group and text:
-                should_reply, reply_text, matched_rule = await self._evaluate_auto_reply(
-                    sender_jid, text,
-                    sender_pushname=sender_name,
-                    sender_jid_alt=sender_jid_alt,
+            chat_key = self._chat_key(chat_jid)
+
+            if is_from_me:
+                # The owner replied here — hand the chat back to them and
+                # cancel anything the bot had queued for it.
+                if not is_group:
+                    self._note_human_activity(chat_key)
+                if text:
+                    await self._maybe_handle_command(client, info, chat_jid, chat_key, text)
+                return
+
+            # Auto-reply (debounced; never for group messages)
+            if not is_group and text:
+                await self._queue_auto_reply(
+                    client, info, chat_key, msg_record,
+                    sender_jid, sender_name, sender_jid_alt,
                 )
-                if should_reply and reply_text:
-                    await asyncio.sleep(2)  # Natural delay
-                    try:
-                        jid = info.MessageSource.Chat
-                        await client.send_message(jid, reply_text)
-                        logger.info(f"Auto-replied to {sender_name}: {reply_text[:80]}")
-                        await self._emit_event("auto_reply_sent", {
-                            "to": sender_jid,
-                            "message": reply_text,
-                            "original_message": text,
-                            "rule_id": matched_rule.get("id") if matched_rule else None,
-                            "via_llm": bool(matched_rule and matched_rule.get("use_llm")),
-                        })
-                    except Exception as e:
-                        logger.error(f"Auto-reply failed: {e}")
 
         except Exception as e:
             logger.error(f"Error handling incoming message: {e}")

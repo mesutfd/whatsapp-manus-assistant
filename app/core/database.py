@@ -18,6 +18,17 @@ logger = logging.getLogger(__name__)
 
 _CONFIG_ID = "singleton"
 
+# Human-handover / control-command defaults. Seeded into the config doc and
+# used as read-time fallbacks for installs that predate these fields.
+PRESENCE_DEFAULTS = {
+    "human_snooze_minutes": 30,   # bot stays out of a chat this long after the owner replies there
+    "reply_delay_seconds": 60,    # debounce before auto-replying (cancelled if the owner replies first)
+    "read_hold_minutes": 5,       # extra hold when the owner read the chat on their phone
+    "command_prefix": "#",
+    "control_contact": "",        # phone digits of the designated control chat ("" = none)
+    "suspended_until": "",        # ISO timestamp from `off 2h`; "" = not suspended
+}
+
 
 def _normalize_contact_key(contact: str) -> str:
     """
@@ -72,9 +83,16 @@ class AppDatabase:
                 "quiet_hours_timezone": settings.QUIET_HOURS_TIMEZONE,
                 "quiet_hours_message": "",
                 "quiet_hours_defer_scheduled": True,
+                **PRESENCE_DEFAULTS,
                 "updated_at": None,
             })
             logger.info("Seeded assistant_config defaults into MongoDB")
+        else:
+            # Backfill presence/command fields on installs that predate them.
+            missing = {k: v for k, v in PRESENCE_DEFAULTS.items() if k not in existing}
+            if missing:
+                await db.assistant_config.update_one({"_id": _CONFIG_ID}, {"$set": missing})
+                logger.info("Backfilled assistant_config fields: %s", sorted(missing))
         logger.info("App database ready (MongoDB: %s)", settings.MONGO_DB_NAME)
 
     # ─── Assistant config (singleton) ────────────────────────────────────
@@ -98,13 +116,21 @@ class AppDatabase:
             "llm_enabled", "llm_system_prompt",
             "quiet_hours_enabled", "quiet_hours_start", "quiet_hours_end",
             "quiet_hours_timezone", "quiet_hours_message", "quiet_hours_defer_scheduled",
+            "human_snooze_minutes", "reply_delay_seconds", "read_hold_minutes",
+            "command_prefix", "control_contact", "suspended_until",
         }
         bool_fields = {"enabled", "llm_enabled", "quiet_hours_enabled", "quiet_hours_defer_scheduled"}
+        int_fields = {"human_snooze_minutes", "reply_delay_seconds", "read_hold_minutes"}
         clean: Dict[str, Any] = {}
         for k, v in fields.items():
             if k not in allowed or v is None:
                 continue
-            clean[k] = bool(v) if k in bool_fields else v
+            if k in bool_fields:
+                clean[k] = bool(v)
+            elif k in int_fields:
+                clean[k] = max(0, int(v))
+            else:
+                clean[k] = v
         if not clean:
             return await self.get_config()
 
@@ -194,6 +220,34 @@ class AppDatabase:
             {"$set": {"last_fired_at": ts}},
             upsert=True,
         )
+
+    # ─── Muted chats (owner said `#mute` — bot stays out until `#unmute`) ─
+
+    async def mute_chat(self, chat_key: str, chat_jid: str = "", name: str = "") -> None:
+        from datetime import datetime
+
+        db = get_db()
+        await db.muted_chats.update_one(
+            {"chat_key": chat_key},
+            {"$set": {"chat_jid": chat_jid, "name": name,
+                      "muted_at": datetime.utcnow().isoformat()},
+             "$setOnInsert": {"chat_key": chat_key}},
+            upsert=True,
+        )
+
+    async def unmute_chat(self, chat_key: str) -> bool:
+        db = get_db()
+        result = await db.muted_chats.delete_one({"chat_key": chat_key})
+        return result.deleted_count > 0
+
+    async def is_chat_muted(self, chat_key: str) -> bool:
+        db = get_db()
+        return await db.muted_chats.find_one({"chat_key": chat_key}) is not None
+
+    async def list_muted_chats(self) -> List[Dict[str, Any]]:
+        db = get_db()
+        cursor = db.muted_chats.find({}).sort("muted_at", -1)
+        return [_strip_mongo_id(d) async for d in cursor]
 
     # ─── Personas ────────────────────────────────────────────────────────
 

@@ -73,4 +73,6 @@ async def ensure_indexes() -> None:
 
     await db.allowed_contacts.create_index("id", unique=True)
 
+    await db.muted_chats.create_index("chat_key", unique=True)
+
     logger.info("MongoDB indexes ensured on %s", settings.MONGO_DB_NAME)

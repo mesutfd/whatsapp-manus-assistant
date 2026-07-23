@@ -246,6 +246,15 @@ class AutoReplyConfig(BaseModel):
     llm_enabled: Optional[bool] = None
     llm_system_prompt: Optional[str] = None
     quiet_hours: Optional[QuietHoursConfig] = None
+    human_snooze_minutes: Optional[int] = Field(
+        None, description="Minutes the bot stays out of a chat after the owner replies there (0 = off)")
+    reply_delay_seconds: Optional[int] = Field(
+        None, description="Debounce before auto-replying; cancelled if the owner replies first (0 = immediate)")
+    read_hold_minutes: Optional[int] = Field(
+        None, description="Extra hold when the owner read the chat on their phone (0 = off)")
+    command_prefix: Optional[str] = Field(None, description="Prefix for in-chat owner commands, e.g. '#'")
+    control_contact: Optional[str] = Field(
+        None, description="Phone digits of the designated control chat where bare commands work")
 
 
 class AutoReplyStatus(BaseModel):
@@ -256,6 +265,13 @@ class AutoReplyStatus(BaseModel):
     llm_enabled: bool = False
     llm_system_prompt: str = ""
     quiet_hours: Dict[str, Any] = {}
+    human_snooze_minutes: int = 30
+    reply_delay_seconds: int = 60
+    read_hold_minutes: int = 5
+    command_prefix: str = "#"
+    control_contact: str = ""
+    suspended_until: str = ""
+    muted_chats: List[Dict[str, Any]] = []
     rules: List[Dict[str, Any]] = []
 
 

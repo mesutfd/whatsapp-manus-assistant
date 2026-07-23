@@ -71,8 +71,34 @@ async def update_assistant_config(
             "quiet_hours_defer_scheduled": qh.defer_scheduled,
         })
 
+    if config.human_snooze_minutes is not None:
+        fields["human_snooze_minutes"] = config.human_snooze_minutes
+    if config.reply_delay_seconds is not None:
+        fields["reply_delay_seconds"] = config.reply_delay_seconds
+    if config.read_hold_minutes is not None:
+        fields["read_hold_minutes"] = config.read_hold_minutes
+    if config.command_prefix is not None:
+        fields["command_prefix"] = config.command_prefix.strip() or "#"
+    if config.control_contact is not None:
+        fields["control_contact"] = wa_client.normalize_phone(config.control_contact)
+
     cfg = await wa_client.set_auto_reply_config(**fields)
     return AutoReplyStatus(**cfg)
+
+
+@router.get("/muted")
+async def list_muted_chats(user: dict = Depends(get_current_user)):
+    """Chats the owner muted via the `#mute` command (or the panel)."""
+    muted = await db.list_muted_chats()
+    return {"muted": muted, "total": len(muted)}
+
+
+@router.delete("/muted/{chat_key}")
+async def unmute_chat(chat_key: str, user: dict = Depends(get_current_user)):
+    ok = await db.unmute_chat(chat_key)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Chat is not muted")
+    return {"success": True, "chat_key": chat_key}
 
 
 @router.get("/llm", response_model=LLMInfo)

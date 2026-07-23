@@ -23,6 +23,7 @@ from app.api.connection import router as connection_router
 from app.api.contacts import router as contacts_router
 from app.api.history_import import router as history_import_router
 from app.api.instructions import router as instructions_router
+from app.api.media import router as media_router
 from app.api.messages import router as messages_router
 from app.api.permissions import router as permissions_router
 from app.api.schedule import router as schedule_router
@@ -174,6 +175,7 @@ app.include_router(smart_router)
 app.include_router(instructions_router)
 app.include_router(permissions_router)
 app.include_router(history_import_router)
+app.include_router(media_router)
 
 # ─── Static Files & Templates ────────────────────────────────────────────────
 
