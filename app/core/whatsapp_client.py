@@ -728,15 +728,15 @@ class WhatsAppClientManager:
         query_lower = query.lower()
 
         for msg in self._message_store:
-            text = msg.get("text", "").lower()
-            sender_name = msg.get("sender_name", "").lower()
+            text = (msg.get("text") or "").lower()
+            sender_name = (msg.get("sender_name") or "").lower()
 
             if query_lower in text or query_lower in sender_name:
                 if contact:
                     contact_lower = contact.lower()
                     from_phone = (msg.get("from_phone") or "").lower()
                     if (
-                        contact_lower in msg.get("from", "").lower()
+                        contact_lower in (msg.get("from") or "").lower()
                         or contact_lower in sender_name
                         or (from_phone and contact_lower in from_phone)
                     ):
