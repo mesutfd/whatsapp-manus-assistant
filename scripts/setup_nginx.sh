@@ -11,7 +11,8 @@
 # renewal config too, so the same stop/start happens automatically on every
 # future auto-renewal, not just this first run.
 #
-# Targets Debian/Ubuntu (apt + systemd). Run as root on the server, after:
+# Targets Debian/Ubuntu (apt) or RHEL-family incl. Amazon Linux (dnf), both
+# with systemd. Run as root on the server, after:
 #   - DNS for each domain below already points at this server's public IP
 #   - `docker compose up -d` is running so the loopback ports respond
 #
@@ -73,16 +74,29 @@ fi
 
 # ── Install nginx / certbot if missing ──────────────────────────────────────
 
+# Debian/Ubuntu use apt-get; RHEL-family (Amazon Linux, Fedora, CentOS...) use
+# dnf. Detect once and reuse for both nginx and certbot below.
+if command -v apt-get >/dev/null 2>&1; then
+  PKG_INSTALL=(apt-get install -y)
+  PKG_UPDATE=(apt-get update -y)
+elif command -v dnf >/dev/null 2>&1; then
+  PKG_INSTALL=(dnf install -y)
+  PKG_UPDATE=(true)
+else
+  echo "Unsupported distro: neither apt-get nor dnf found." >&2
+  exit 1
+fi
+
 if ! command -v nginx >/dev/null 2>&1; then
   echo "==> Installing nginx..."
-  apt-get update -y
-  apt-get install -y nginx
+  "${PKG_UPDATE[@]}"
+  "${PKG_INSTALL[@]}" nginx
 fi
 
 if [[ $ENABLE_SSL -eq 1 ]] && ! command -v certbot >/dev/null 2>&1; then
   echo "==> Installing certbot..."
-  apt-get update -y
-  apt-get install -y certbot
+  "${PKG_UPDATE[@]}"
+  "${PKG_INSTALL[@]}" certbot
 fi
 
 # ── Where vhost files go (Debian-style sites-available/enabled, falling ────
@@ -107,7 +121,9 @@ CERT_DIR="/etc/letsencrypt/live/$CERT_NAME"
 # ── does, includes the HTTPS server block + a plain HTTP->HTTPS redirect. ──
 
 write_vhost() {
-  local domain="$1" port="$2" conf_path="$VHOST_DIR/$domain.conf"
+  local domain="$1"
+  local port="$2"
+  local conf_path="$VHOST_DIR/$domain.conf"
 
   if [[ -f "$CERT_DIR/fullchain.pem" ]]; then
     echo "==> Writing $conf_path (proxy -> 127.0.0.1:$port, HTTPS)"
