@@ -145,6 +145,9 @@ server {
     ssl_certificate_key $CERT_DIR/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
 
+    # Backup/media-bundle uploads can be multi-GB (app-side cap is 8 GB).
+    client_max_body_size 8g;
+
     location / {
         proxy_pass http://127.0.0.1:$port;
         proxy_http_version 1.1;
@@ -154,7 +157,10 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_read_timeout 90s;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+        # Stream large uploads straight to the app instead of buffering to disk.
+        proxy_request_buffering off;
     }
 }
 EOF
@@ -166,6 +172,9 @@ server {
     listen [::]:80;
     server_name $domain;
 
+    # Backup/media-bundle uploads can be multi-GB (app-side cap is 8 GB).
+    client_max_body_size 8g;
+
     location / {
         proxy_pass http://127.0.0.1:$port;
         proxy_http_version 1.1;
@@ -175,7 +184,10 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_read_timeout 90s;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+        # Stream large uploads straight to the app instead of buffering to disk.
+        proxy_request_buffering off;
     }
 }
 EOF
