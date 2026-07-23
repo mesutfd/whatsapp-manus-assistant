@@ -95,6 +95,24 @@ class MessageHistoryDB:
             for m in msgs
         ]
         result = await db.messages.bulk_write(ops, ordered=False)
+
+        # A re-import can carry media binaries for messages that already exist
+        # as placeholders (DB-only import first, media bundle later).
+        # $setOnInsert leaves existing docs untouched, so upgrade their media
+        # explicitly.
+        media_ops = [
+            UpdateOne(
+                {**_natural_key(m, source), "media.placeholder": True},
+                {"$set": {"media": m["media"]}},
+            )
+            for m in msgs
+            if (m.get("media") or {}).get("file_id")
+        ]
+        if media_ops:
+            upgraded = (await db.messages.bulk_write(media_ops, ordered=False)).modified_count
+            if upgraded:
+                logger.info("Upgraded media on %d existing placeholder messages", upgraded)
+
         return result.upserted_count
 
     async def load_recent(self, limit: int) -> List[Dict[str, Any]]:
